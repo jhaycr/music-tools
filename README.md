@@ -52,7 +52,8 @@ services:
       # APPRISE_URL: http://apprise:8000/notify/<key>   # optional
 ```
 
-The default command is `deemix run`. From the host's crontab, every hour:
+The default command is `run`: every scheduled tool, each on its own (today,
+`deemix run`). From the host's crontab, every hour:
 
 ```
 17 * * * * docker start -a music-tools
@@ -64,7 +65,8 @@ renewing an expired login (you are told it has expired instead).
 ## Commands
 
 ```
-music-tools deemix run                    deemix arl renew if needed, then deemix follow (the default)
+music-tools run                           every scheduled tool, each on its own (the default)
+music-tools deemix run                    deemix arl renew if needed, then deemix follow
 music-tools deemix follow [--dry-run]     queue new releases of the favourite artists
 music-tools deemix arl check              does deemix's stored login still work?
 music-tools deemix arl renew [--force]    new ARL from the email and password, given to deemix
@@ -76,6 +78,26 @@ music-tools artist search NAME            Deezer artists of that name, told apar
 
 `docker exec` does not work on a stopped one-shot container; use
 `docker compose run --rm music-tools artist search she`.
+
+## When something is wrong
+
+Every event is one line in the log, `<UTC time> <INFO|WARN|ERROR> <tool>: <message>`;
+alert on `ERROR`. `run` runs each tool on its own: one failing, or crashing
+outright (logged with its traceback), never stops the others, and `run` exits
+1 naming the ones that failed.
+
+| Situation | What happens |
+|---|---|
+| deemix's login works, email/password not configured | `WARN` each run naming the missing setting; following carries on |
+| login expired or missing, no email/password | `ERROR` naming what is missing (the variable, or the empty file); nothing is queued; deemix's stored login is left alone |
+| login expired, wrong password | `ERROR` with Deezer's own reason; deemix left alone |
+| Deezer can't be reached | `ERROR`; no renewal attempted (an outage is not an expired login) |
+| a release deemix won't queue | `ERROR` for that release; the rest queue; it is tried again next run |
+| `artist search` without a working login | `WARN`; the search runs, favourites just aren't marked |
+
+Each problem is also notified once (with `APPRISE_URL`), not on every run
+while it lasts. Credentials are never printed: messages name the setting or
+the file, never its contents.
 
 ## Telling artists apart
 

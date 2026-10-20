@@ -336,3 +336,113 @@ def test_favorite_adds_once(w):
     assert r == {"id": 7, "name": "K/DA", "already": False} and w.favorited == [7]
     w.favs.append({"ART_ID": "7", "ART_NAME": "K/DA"})
     assert add_favorite(account(w), catalogue(w), {"id": 7, "name": "K/DA"})["already"]
+
+
+# ---- failures: loud in the log, and never stopping the other tools
+
+@pytest.fixture
+def cli(w, monkeypatch):
+    """main() as cron runs it, against the fake world; returns (run, notifications)."""
+    import music_tools.arl, music_tools.artists, music_tools.cli, music_tools.deezer
+    for mod in (music_tools.arl, music_tools.cli, music_tools.deezer, music_tools.artists):
+        monkeypatch.setattr(mod, "Http", factory(w))
+    sent = []
+    monkeypatch.setattr(music_tools.cli, "notify", lambda url, title, body: sent.append(body))
+    d = w.login_file.parent
+    monkeypatch.setenv("DEEMIX_LOGIN", str(w.login_file))
+    monkeypatch.setenv("MT_DB", str(d / "state.db"))
+    monkeypatch.setenv("APPRISE_URL", "http://apprise/notify/x")
+    monkeypatch.setenv("MT_LIBRARY", str(d / "no-library"))
+    for k in ("DEEZER_EMAIL_FILE", "DEEZER_PASSWORD_FILE"):
+        monkeypatch.delenv(k, raising=False)
+
+    def creds(email="me@example.com", password="pw"):
+        (d / "email").write_text(email)
+        (d / "password").write_text(password)
+        monkeypatch.setenv("DEEZER_EMAIL_FILE", str(d / "email"))
+        monkeypatch.setenv("DEEZER_PASSWORD_FILE", str(d / "password"))
+
+    def run(*argv):
+        from music_tools.cli import main
+        return main(list(argv))
+    run.creds = creds
+    return run, sent
+
+
+def errors(out):
+    return [l for l in out.splitlines() if " ERROR " in l]
+
+
+def test_expired_login_and_no_credentials_is_an_error_alerted_once(cli, w, capsys):
+    run, sent = cli
+    w.valid = {NEW}  # Deezer no longer takes the stored ARL
+    assert run("run") == 1
+    errs = errors(capsys.readouterr().out)
+    assert any("deemix: login: deemix's Deezer login is invalid" in e and "DEEZER_EMAIL_FILE is not set" in e
+               for e in errs), errs
+    assert any("run: failed: deemix" in e for e in errs)
+    assert len(sent) == 1 and run("run") == 1 and len(sent) == 1, "alerted once while it lasts"
+    assert stored_arl(str(w.login_file)) == GOOD
+
+
+def test_an_empty_password_file_is_named(cli, w, capsys):
+    run, _ = cli
+    w.valid = {NEW}
+    run.creds(password="")
+    assert run("deemix", "run") == 1
+    assert "password (DEEZER_PASSWORD_FILE) is empty or unreadable" in capsys.readouterr().out
+
+
+def test_wrong_password_says_what_deezer_said(cli, w, capsys):
+    run, _ = cli
+    w.valid = {NEW}
+    run.creds(password="wrong")
+    assert run("run") == 1
+    out = capsys.readouterr().out
+    assert "ERROR deemix: login: Deezer refused the email login: Invalid login" in out and "wrong" not in out
+    assert stored_arl(str(w.login_file)) == GOOD
+
+
+def test_a_working_login_without_credentials_still_follows_with_a_warning(cli, w, capsys):
+    run, _ = cli
+    assert run("run") == 0
+    out = capsys.readouterr().out
+    assert "WARN  deemix: login works, but can't be renewed when it expires: DEEZER_EMAIL_FILE is not set" in out
+    assert "INFO  deemix: 1 favourite artists" in out and not errors(out)
+
+
+def test_one_tool_crashing_does_not_stop_the_others(cli, monkeypatch, capsys):
+    import music_tools.cli as c
+    run, _ = cli
+    ran = []
+
+    def boom(a, cfg):
+        raise RuntimeError("a bug")
+    monkeypatch.setattr(c, "JOBS", [("first", boom), ("second", lambda a, cfg: ran.append(1) or 0)])
+    assert run("run") == 1 and ran == [1]
+    out = capsys.readouterr().out
+    assert "ERROR first: crashed" in out and "RuntimeError: a bug" in out and "run: failed: first (the others ran)" in out
+
+
+def test_a_missing_login_does_not_stop_artist_search(cli, w, monkeypatch, capsys):
+    import music_tools.cli as c
+    run, _ = cli
+    w.login_file.unlink()
+    monkeypatch.setattr(c, "Catalogue", lambda: Catalogue(FakeHttp(w), min_interval=0))
+    from music_tools.artists import MusicBrainz
+    monkeypatch.setattr(c, "MusicBrainz", lambda: MusicBrainz(ArtistsHttp(), min_interval=0))
+    w.favs = []
+    monkeypatch.setattr(FakeHttp, "request", lambda self, m, url, params=None, body=None, headers=None:
+                        ArtistsHttp().request(m, url, params, body, headers))
+    assert run("artist", "search", "She") == 0
+    out = capsys.readouterr().out
+    assert "WARN  artist: deemix's Deezer login is missing: favourites are not marked" in out
+    assert "She  Deezer 2" in out
+
+
+def test_follow_and_favorite_refuse_cleanly_without_a_login(cli, w, capsys):
+    run, _ = cli
+    w.valid = set()
+    assert run("deemix", "follow") == 1 and run("deemix", "favorite", "add", "7") == 1
+    errs = errors(capsys.readouterr().out)
+    assert len(errs) == 2 and all("login is invalid" in e for e in errs)

@@ -43,6 +43,17 @@ class Config:
             library=e("MT_LIBRARY", "/music"),
         )
 
+    def credentials_problem(self) -> str | None:
+        """Why the Deezer email and password can't be used, or None. Never their contents."""
+        for var, path in (("DEEZER_EMAIL_FILE", self.email_file), ("DEEZER_PASSWORD_FILE", self.password_file)):
+            if not path:
+                return f"{var} is not set"
+            if not os.path.isfile(path):
+                return f"{var} names {path}, which does not exist"
+            if not _read(path):
+                return f"{path} ({var}) is empty or unreadable"
+        return None
+
     def credentials(self) -> tuple[str, str] | None:
         email, password = _read(self.email_file), _read(self.password_file)
         return (email, password) if email and password else None

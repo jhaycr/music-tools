@@ -18,8 +18,9 @@ class RenewError(Exception):
     pass
 
 
-def check(cfg: Config, http=Http) -> tuple[str, Account | None]:
+def check(cfg: Config, http=None) -> tuple[str, Account | None]:
     """('valid', account) | ('invalid', None) | ('missing', None) | ('unreachable', None)."""
+    http = http or Http
     arl = stored_arl(cfg.login_file)
     if not arl:
         return "missing", None
@@ -31,17 +32,18 @@ def check(cfg: Config, http=Http) -> tuple[str, Account | None]:
     return ("valid", account) if ok else ("invalid", None)
 
 
-def ensure(cfg: Config, force: bool = False, http=Http, log=print) -> tuple[Account, bool]:
+def ensure(cfg: Config, force: bool = False, http=None, log=print) -> tuple[Account, bool]:
     """A logged-in account, renewing deemix's ARL first if it has to. Returns (account, renewed)."""
+    http = http or Http
     state, account = check(cfg, http)
     if state == "valid" and not force:
         return account, False
     if state == "unreachable":
-        raise RenewError("Deezer can't be reached to check the login; not renewing")
+        raise RenewError("Deezer can't be reached to check deemix's login; not renewing, trying next run")
     creds = cfg.credentials()
     if not creds:
-        raise RenewError(f"deemix's Deezer login is {state}, and no email and password are configured "
-                         "(DEEZER_EMAIL_FILE, DEEZER_PASSWORD_FILE) to renew it")
+        raise RenewError(f"deemix's Deezer login is {state}, and it can't be renewed: no email and password "
+                         f"are configured ({cfg.credentials_problem()})")
     log(f"arl: deemix's login is {state}; logging in with the account's email and password")
     try:
         arl = arl_from_login(*creds, http=http())

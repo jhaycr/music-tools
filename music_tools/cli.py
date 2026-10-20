@@ -1,6 +1,7 @@
 """music-tools: small one-shot tools for a self-hosted music library, cron-friendly.
 
-  deemix run                   deemix arl renew if needed, then deemix follow: what cron runs
+  run                          every scheduled tool, each on its own (now: deemix run)
+  deemix run                   deemix arl renew if needed, then deemix follow
   deemix follow [--dry-run]    queue new releases of the Deezer account's favourite artists
   deemix arl check             does deemix's stored Deezer login still work?
   deemix arl renew [--force]   make a new ARL from the email and password, hand it to deemix
@@ -23,7 +24,8 @@ from .deezer import Catalogue, DeezerError
 from .follow import add_favorite, follow
 from .http import Http, HttpError
 from .notify import notify
-from .store import Store, now
+from . import log
+from .store import Store
 
 
 def _alert(cfg: Config, store: Store, title: str, body: str) -> None:
@@ -38,32 +40,45 @@ def _clear_alert(store: Store) -> None:
         store.set_meta("last_alert", "")
 
 
+def _login(cfg: Config, store: Store, force: bool = False):
+    """deemix's Deezer account, renewing the login if it must. None (logged as an ERROR) when it can't."""
+    try:
+        account, renewed = ensure(cfg, force=force, log=lambda m: log.info("deemix", m))
+    except RenewError as e:
+        log.error("deemix", f"login: {e}")
+        _alert(cfg, store, "music-tools: deemix's Deezer login is broken", str(e))
+        return None
+    if renewed:
+        notify(cfg.apprise_url, "music-tools", "deemix's Deezer login was renewed from the account's email")
+    elif cfg.credentials_problem():
+        log.warn("deemix", f"login works, but can't be renewed when it expires: {cfg.credentials_problem()}")
+    return account
+
+
 def cmd_arl(a, cfg: Config) -> int:
     if a.action == "check":
         state, account = check(cfg)
         who = f" as {account.user.get('BLOG_NAME') or account.user['USER_ID']}" if account else ""
-        print(f"arl: deemix's Deezer login is {state}{who}")
+        (log.info if state == "valid" else log.error)("deemix", f"deemix's Deezer login is {state}{who}")
+        problem = cfg.credentials_problem()
+        if problem:
+            log.warn("deemix", f"renewal not possible: {problem}")
         return 0 if state == "valid" else 2
     store = Store(cfg.db)
-    try:
-        _, renewed = ensure(cfg, force=a.force)
-    except RenewError as e:
-        print(f"arl: NOT renewed: {e}")
-        _alert(cfg, store, "music-tools: deemix's Deezer login is broken", str(e))
+    if _login(cfg, store, force=a.force) is None:
         return 1
-    if renewed:
-        notify(cfg.apprise_url, "music-tools", "deemix's Deezer login was renewed from the account's email")
-    else:
-        print("arl: deemix's login works; nothing to do (--force renews anyway)")
+    if not a.force:
+        log.info("deemix", "deemix's login works; nothing to renew (--force renews anyway)")
     return 0
 
 
 def _follow(cfg: Config, store: Store, account, dry_run: bool) -> int:
     out = follow(store, account, Catalogue(), None if dry_run else Deemix(cfg.deemix_url, Http(timeout=120)),
-                 max_queue=cfg.max_queue, bitrate=cfg.bitrate, dry_run=dry_run)
+                 max_queue=cfg.max_queue, bitrate=cfg.bitrate, dry_run=dry_run,
+                 log=lambda m: log.info("deemix", m), err=lambda m: log.error("deemix", m))
     verb = "would queue" if dry_run else "queued"
-    print(f"follow: {out['artists']} favourite artists, {verb} {len(out['queued'])}, "
-          f"{len(out['failed'])} failed, {out['deferred']} left for the next run")
+    log.info("deemix", f"{out['artists']} favourite artists, {verb} {len(out['queued'])}, "
+                       f"{len(out['failed'])} failed, {out['deferred']} left for the next run")
     if out["queued"] and not dry_run:
         notify(cfg.apprise_url, f"music-tools: {len(out['queued'])} new releases downloading",
                "\n".join(out["queued"][:40]) + (f"\n... and {len(out['queued']) - 40} more" if len(out["queued"]) > 40 else ""))
@@ -76,26 +91,20 @@ def cmd_follow(a, cfg: Config) -> int:
     store = Store(cfg.db)
     state, account = check(cfg)
     if state != "valid":
-        print(f"follow: deemix's Deezer login is {state}; `music-tools deemix arl renew` (or `deemix run`) fixes that")
+        log.error("deemix", f"deemix's Deezer login is {state}; `music-tools deemix arl renew` fixes that")
         return 1
     return _follow(cfg, store, account, a.dry_run)
 
 
-def cmd_run(a, cfg: Config) -> int:
-    print(f"music-tools run {now()}")
+def cmd_deemix_run(a, cfg: Config) -> int:
     store = Store(cfg.db)
-    try:
-        account, renewed = ensure(cfg)
-    except RenewError as e:
-        print(f"arl: NOT renewed: {e}")
-        _alert(cfg, store, "music-tools: deemix's Deezer login is broken", str(e))
+    account = _login(cfg, store)
+    if account is None:
         return 1
-    if renewed:
-        notify(cfg.apprise_url, "music-tools", "deemix's Deezer login was renewed from the account's email")
     try:
         rc = _follow(cfg, store, account, dry_run=False)
-    except (DeezerError, HttpError) as e:
-        print(f"follow: {e}")
+    except (DeezerError, DeemixError, HttpError) as e:
+        log.error("deemix", f"follow: {e}")
         _alert(cfg, store, "music-tools: follow failed", str(e))
         return 1
     if rc == 0:
@@ -103,19 +112,43 @@ def cmd_run(a, cfg: Config) -> int:
     return rc
 
 
+# What `music-tools run` (the container's default) runs, each on its own: one
+# failing or crashing is logged and the rest still run.
+JOBS = [("deemix", cmd_deemix_run)]
+
+
+def cmd_run(a, cfg: Config) -> int:
+    log.info("run", f"music-tools run: {', '.join(n for n, _ in JOBS)}")
+    failed = []
+    for name, job in JOBS:
+        try:
+            rc = job(a, cfg)
+        except Exception:  # a bug in one tool must not stop the others
+            log.error(name, "crashed", exc=True)
+            rc = 1
+        if rc:
+            failed.append(name)
+    if failed:
+        log.error("run", f"failed: {', '.join(failed)} (the others ran)")
+        return 1
+    log.info("run", "all ok")
+    return 0
+
+
 def cmd_favorite(a, cfg: Config) -> int:
     state, account = check(cfg)
     if state != "valid":
-        print(f"favorite: deemix's Deezer login is {state}; `music-tools deemix arl renew` fixes that")
+        log.error("deemix", f"can't favourite: deemix's Deezer login is {state}; "
+                            "`music-tools deemix arl renew` fixes that")
         return 1
     try:
         cat = Catalogue()
         r = add_favorite(account, cat, resolve(a.artist, cat, MusicBrainz()))
     except (ArtistError, DeezerError, HttpError) as e:
-        print(f"favorite: {e}")
+        log.error("deemix", f"favorite: {e}")
         return 1
-    print(f"favorite: {r['name']} ({r['id']}) " + ("was already a favourite" if r["already"]
-                                                   else "is now a favourite; the next run downloads its catalogue"))
+    log.info("deemix", f"{r['name']} ({r['id']}) " + ("was already a favourite" if r["already"]
+                                                     else "is now a favourite; the next run downloads its catalogue"))
     return 0
 
 
@@ -124,6 +157,8 @@ def cmd_artist(a, cfg: Config) -> int:
     state, account = check(cfg)
     if state == "valid":
         favourites = {f["id"] for f in account.favorite_artists()}
+    else:  # the search needs no login; it just can't mark favourites
+        log.warn("artist", f"deemix's Deezer login is {state}: favourites are not marked")
     print(f"searching Deezer and MusicBrainz for {a.name!r} (MusicBrainz allows one request a second)...")
     cands, unmatched = search(a.name, Catalogue(), MusicBrainz(), cfg.library, favourites)
     if not cands:
@@ -172,6 +207,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="music-tools", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     tools = p.add_subparsers(dest="tool", required=True)
+    tools.add_parser("run", help="every scheduled tool, each on its own: what cron runs")
     dz = tools.add_parser("deemix", help="follow favourite artists; keep deemix logged in")
     sub = dz.add_subparsers(dest="cmd", required=True)
     sub.add_parser("run", help="arl renew if needed, then follow")
@@ -190,13 +226,16 @@ def main(argv=None) -> int:
     s.add_argument("name")
     a = p.parse_args(argv)
     cfg = Config.from_env()
-    handlers = {("deemix", "run"): cmd_run, ("deemix", "follow"): cmd_follow, ("deemix", "arl"): cmd_arl,
+    handlers = {("run", None): cmd_run, ("deemix", "run"): cmd_deemix_run, ("deemix", "follow"): cmd_follow, ("deemix", "arl"): cmd_arl,
                 ("deemix", "favorite"): cmd_favorite, ("deemix", "status"): cmd_status,
                 ("artist", "search"): cmd_artist}
     try:
-        return handlers[(a.tool, a.cmd)](a, cfg)
-    except (DeemixError, DeezerError, HttpError) as e:
-        print(f"{a.tool} {a.cmd}: {e}")
+        return handlers[(a.tool, getattr(a, "cmd", None))](a, cfg)
+    except (DeemixError, DeezerError, HttpError, ArtistError) as e:
+        log.error(a.tool, str(e))
+        return 1
+    except Exception:
+        log.error(a.tool, "crashed", exc=True)
         return 1
 
 if __name__ == "__main__":

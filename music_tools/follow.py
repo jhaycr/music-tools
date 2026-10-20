@@ -42,7 +42,8 @@ def pick(releases: list[dict], today: str) -> list[dict]:
 
 def follow(store: Store, account: Account, catalogue: Catalogue, deemix: Deemix | None,
            max_queue: int = 100, bitrate: str | None = None, dry_run: bool = False,
-           today: str | None = None, log=print) -> dict:
+           today: str | None = None, log=print, err=None) -> dict:
+    err = err or log
     today = today or date.today().isoformat()
     first_run = store.get_meta("initialized") is None
     favs = account.favorite_artists()
@@ -54,14 +55,14 @@ def follow(store: Store, account: Account, catalogue: Catalogue, deemix: Deemix 
         mode = ("baseline" if first_run else "backfill") if new else row["mode"]
         if new:
             out["new_artists"].append(a["name"])
-            log(f"follow: {a['name']}: " + ("new releases from today" if mode == "baseline"
+            log(f"{a['name']}: " + ("new releases from today" if mode == "baseline"
                                             else "whole catalogue, then new releases"))
             if not dry_run:
                 store.add_artist(a["id"], a["name"], mode)
         try:
             releases = pick(catalogue.releases(a["id"]), today)
         except (DeezerError, HttpError) as e:
-            log(f"follow: {a['name']}: can't read releases ({e}); next run")
+            err(f"{a['name']}: can't read releases ({e}); next run")
             out["failed"].append(f"{a['name']}: {e}")
             continue
         have = {(norm(r["title"]), r["type"]) for r in store.titles(a["id"])}
@@ -82,26 +83,26 @@ def follow(store: Store, account: Account, catalogue: Catalogue, deemix: Deemix 
             budget -= 1
             label = f"{a['name']} - {r['title']} ({r['type']}, {r['date']})"
             if dry_run:
-                log(f"follow: would queue {label}")
+                log(f"would queue {label}")
                 out["queued"].append(label)
                 continue
             try:
                 deemix.queue(f"https://www.deezer.com/album/{r['id']}", bitrate)
             except (DeemixError, HttpError) as e:
                 store.mark(r, a["id"], "failed", str(e))
-                log(f"follow: FAILED {label}: {e}")
+                err(f"FAILED to queue {label}: {e}")
                 out["failed"].append(f"{label}: {e}")
                 continue
             store.mark(r, a["id"], "queued")
             have.add((norm(r["title"]), r["type"]))
-            log(f"follow: queued {label}")
+            log(f"queued {label}")
             out["queued"].append(label)
     if not dry_run:
         store.set_active({a["id"] for a in favs})
         if first_run:
             store.set_meta("initialized", now())
     if out["deferred"]:
-        log(f"follow: {out['deferred']} more over the limit of {max_queue} a run; next run")
+        log(f"{out['deferred']} more over the limit of {max_queue} a run; next run")
     return out
 
 
