@@ -1,0 +1,20 @@
+[project]
+name = "deemix-helper"
+version = "0.1.0"
+description = "Small cron-friendly tools around a deemix server: follow favourite artists, keep the Deezer login alive"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+deemix-helper = "deemix_helper.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["deemix_helper"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
