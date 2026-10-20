@@ -33,6 +33,7 @@ services:
     volumes:
       - ./deemix-helper:/config                  # its state (SQLite)
       - ./deemix/config:/deemix:ro               # deemix's config folder, for login.json
+      - ./music:/music:ro                        # optional: the library, for artist search
       - ./secrets/deezer-email:/run/secrets/deezer-email:ro
       - ./secrets/deezer-password:/run/secrets/deezer-password:ro
     environment:
@@ -58,13 +59,49 @@ deemix-helper run                     arl renew if needed, then follow (the defa
 deemix-helper follow [--dry-run]      queue new releases of the favourite artists
 deemix-helper arl check               does deemix's stored login still work?
 deemix-helper arl renew [--force]     new ARL from the email and password, given to deemix
-deemix-helper favorite add ARTIST     favourite an artist (exact name, Deezer id or URL)
+deemix-helper artist search NAME      Deezer artists of that name, told apart (below)
+deemix-helper favorite add ID         favourite an artist: Deezer artist id or URL, or a
+                                      MusicBrainz artist id. Never a name
 deemix-helper status                  artists followed, latest releases queued
 ```
 
 `docker exec` does not work on a stopped one-shot container; use
 `docker run --rm ... ghcr.io/jhaycr/deemix-helper status` with the same
 volumes, or `docker compose run --rm deemix-helper status`.
+
+## Telling artists apart
+
+Many artists share a name: Deezer has at least four called "She". So
+deemix-helper never takes a name for an artist, only an id:
+
+- a **Deezer artist id** (or `deezer.com/artist/...` URL), which is what the
+  account's favourites hold;
+- a **MusicBrainz artist id**, as in a library tagged by Picard or beets. It is
+  resolved by MusicBrainz's own Deezer link, then Wikidata's, then by the
+  release titles both catalogues share, and refused when no match is clear.
+
+`artist search` shows the evidence for each match:
+
+```
+$ deemix-helper artist search she
+
+She  Deezer 117840782  * a favourite
+  367 fans, 23 releases
+  latest: Salvo (single, 2025-05-02); Chiptronica (single, 2025-03-10); ...
+  MusicBrainz 99e34e68-0320-4c3e-901d-0a307ed504a4: Polish electronic musician
+    based in Sweden, Person, Sweden, from 1983 (22 release titles in common)
+  Wikipedia: she is a musical project formed in 2003 by ...
+  in your library: General/she (18 of its 30 albums are this artist's)
+
+SHE  Deezer 365804512
+  7 fans, 6 releases
+  latest: Rain All Over Me (single, 2026-08-14); ...
+```
+
+The library line needs the library mounted read-only at `/music`
+(`DH_LIBRARY`), laid out `<Category>/<Artist>/<Album (Year)>`; folders are
+matched by album titles, and a folder of that name that none of the matches
+accounts for is listed too.
 
 ## How following works
 
@@ -114,6 +151,7 @@ email and password are read from files, so `docker inspect` doesn't show them.
 | `DH_BITRATE` | deemix's own | e.g. `9` FLAC, `3` MP3 320 |
 | `DH_MAX_QUEUE` | `100` | releases queued per run |
 | `APPRISE_URL` | unset | an apprise-api `/notify/<key>` URL |
+| `DH_LIBRARY` | `/music` | the library, read-only, for `artist search` |
 
 Notifications: releases queued, a login renewed, and problems (each problem
 once, not on every run while it lasts).

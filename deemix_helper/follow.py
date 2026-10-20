@@ -105,8 +105,7 @@ def follow(store: Store, account: Account, catalogue: Catalogue, deemix: Deemix 
     return out
 
 
-def add_favorite(account: Account, catalogue: Catalogue, query: str) -> dict:
-    artist = catalogue.find_artist(query)
+def add_favorite(account: Account, catalogue: Catalogue, artist: dict) -> dict:
     if any(f["id"] == artist["id"] for f in account.favorite_artists()):
         return {**artist, "already": True}
     account.add_favorite_artist(artist["id"])

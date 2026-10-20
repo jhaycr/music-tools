@@ -243,16 +243,96 @@ def test_arl_from_login_rejects_garbage(w):
         arl_from_login("me@example.com", "pw", http=FakeHttp(w))
 
 
+# ---- artists: ids, never names
+
+class ArtistsHttp:
+    """Deezer has three "She"; MusicBrainz knows one, with no Deezer link."""
+    MB_SHE = "99e34e68-0320-4c3e-901d-0a307ed504a4"
+    MB_LINKED = "11111111-2222-3333-4444-555555555555"
+
+    def __init__(self, timeout=30):
+        self.calls = []
+
+    def set_cookie(self, *a):
+        pass
+
+    def request(self, method, url, params=None, body=None, headers=None):
+        p = params or {}
+        self.calls.append(url)
+        if url.endswith("/search/artist"):
+            return {"data": [{"id": 1, "name": "She", "nb_fan": 3}, {"id": 2, "name": "She", "nb_fan": 367},
+                             {"id": 3, "name": "SHE", "nb_fan": 7}, {"id": 4, "name": "She & Him", "nb_fan": 9}]}
+        if "/artist/" in url and url.endswith("/albums"):
+            aid = int(url.split("/artist/")[1].split("/")[0])
+            return {"data": {1: [rel(10, "Wants a Piece of You", "album", "2017-05-26")],
+                             2: [rel(20, "Chiptek", "album", "2008-01-01"), rel(21, "Atomic", "album", "2009-01-01"),
+                                 rel(22, "Abyss (Deluxe Edition)", "album", "2016-01-01"),
+                                 rel(23, "Salvo", "single", "2025-05-02")],
+                             3: [rel(30, "echo", "single", "2026-04-17")]}.get(aid, [])}
+        if "api.deezer.com/artist/" in url:
+            aid = int(url.rsplit("/", 1)[1])
+            return {"id": aid, "name": {2: "She", 5: "Linked Band"}.get(aid, "Someone"), "nb_fan": 1}
+        if url.endswith("/ws/2/artist"):
+            assert headers and "deemix-helper" in headers["User-Agent"]
+            return {"artists": [{"id": self.MB_SHE, "name": "she"}, {"id": "x", "name": "S.H.E"}]}
+        if "/ws/2/artist/" in url:
+            mbid = url.rsplit("/", 1)[1]
+            if mbid == self.MB_LINKED:
+                return {"name": "Linked Band", "relations": [{"url": {"resource": "https://www.deezer.com/artist/5"}}]}
+            if mbid == self.MB_SHE:
+                return {"name": "she", "disambiguation": "Polish electronic musician based in Sweden", "type": "Person",
+                        "relations": [{"url": {"resource": "https://www.wikidata.org/wiki/Q20038335"}}]}
+            return {}
+        if url.endswith("/ws/2/release-group"):
+            return {"release-groups": [{"title": t} for t in ("Chiptek", "Atomic", "Abyss", "Coloris")],
+                    "release-group-count": 4}
+        if "wikidata.org" in url:
+            return {"entities": {"Q20038335": {"claims": {}, "sitelinks": {"enwiki": {"title": "She (musician)"}}}}}
+        if "wikipedia.org" in url:
+            assert url.endswith("She_%28musician%29")
+            return {"extract": "she is a musical project formed in 2003. It makes chiptune. A third sentence."}
+        raise AssertionError(url)
+
+
+def artists_env():
+    from deemix_helper.artists import MusicBrainz
+    h = ArtistsHttp()
+    return Catalogue(h, min_interval=0), MusicBrainz(h, min_interval=0), h
+
+
+def test_search_tells_same_named_artists_apart(tmp_path):
+    from deemix_helper.artists import search
+    lib = tmp_path / "music"
+    for d in ("General/she/Chiptek (2008)", "General/she/Abyss (2016)", "General/She/Trigger (2025)",
+              "Family/she/Chiptek (2008)"):
+        (lib / d).mkdir(parents=True)
+    cat, mb, h = artists_env()
+    cands, unmatched = search("She", cat, mb, str(lib), favourites={2}, http=h)
+    assert [c["id"] for c in cands] == [1, 2, 3], "exact names only, case aside"
+    she = cands[1]
+    assert she["favourite"] and she["latest"][0]["title"] == "Salvo"
+    assert she["mb"]["id"] == ArtistsHttp.MB_SHE and she["mb"]["common"] == 3 and not she["mb"]["linked"]
+    assert she["mb"]["wikipedia"] == "she is a musical project formed in 2003. It makes chiptune."
+    assert she["library"] == [{"path": "General/she", "albums": 2, "on_deezer": 2}]
+    assert cands[0]["mb"] is None and unmatched == [{"path": "General/She", "albums": 1}], "Family is skipped"
+
+
+def test_resolve_takes_ids_and_refuses_names():
+    from deemix_helper.artists import ArtistError, resolve
+    cat, mb, h = artists_env()
+    assert resolve("https://www.deezer.com/en/artist/2", cat, mb, h)["id"] == 2
+    assert resolve("2", cat, mb, h)["id"] == 2
+    assert resolve(ArtistsHttp.MB_LINKED, cat, mb, h)["id"] == 5, "MusicBrainz's own Deezer link"
+    assert resolve(f"https://musicbrainz.org/artist/{ArtistsHttp.MB_SHE}", cat, mb, h)["id"] == 2, "by titles"
+    with pytest.raises(ArtistError, match="artist search She"):
+        resolve("She", cat, mb, h)
+
+
 # ---- favourites
 
-def test_favorite_by_exact_name(w):
+def test_favorite_adds_once(w):
     from deemix_helper.follow import add_favorite
-    r = add_favorite(account(w), catalogue(w), "k/da")
+    r = add_favorite(account(w), catalogue(w), {"id": 7, "name": "K/DA"})
     assert r == {"id": 7, "name": "K/DA", "already": False} and w.favorited == [7]
     w.favs.append({"ART_ID": "7", "ART_NAME": "K/DA"})
-    assert add_favorite(account(w), catalogue(w), "https://www.deezer.com/en/artist/7")["already"]
-
-
-def test_no_exact_name_lists_the_closest(w):
-    with pytest.raises(DeezerError, match="closest: K/DA"):
-        catalogue(w).find_artist("KDA")
+    assert add_favorite(account(w), catalogue(w), {"id": 7, "name": "K/DA"})["already"]

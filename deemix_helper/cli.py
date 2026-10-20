@@ -4,7 +4,10 @@
   follow [--dry-run]       queue new releases of the account's favourite artists
   arl check                does deemix's stored Deezer login still work?
   arl renew [--force]      make a new ARL from the email and password, hand it to deemix
-  favorite add ARTIST      favourite an artist on the account (name, id or URL)
+  artist search NAME       Deezer artists of that name, told apart: latest releases,
+                           MusicBrainz match and bio, the library folder that is theirs
+  favorite add ID          favourite an artist: a Deezer artist id or URL, or a
+                           MusicBrainz artist id (never a name)
   status                   artists followed and the latest releases queued
 """
 from __future__ import annotations
@@ -13,6 +16,7 @@ import argparse
 import sys
 
 from .arl import RenewError, check, ensure
+from .artists import ArtistError, MusicBrainz, resolve, search
 from .config import Config
 from .deemix import Deemix, DeemixError
 from .deezer import Catalogue, DeezerError
@@ -105,12 +109,44 @@ def cmd_favorite(a, cfg: Config) -> int:
         print(f"favorite: deemix's Deezer login is {state}; `arl renew` fixes that")
         return 1
     try:
-        r = add_favorite(account, Catalogue(), a.artist)
-    except (DeezerError, HttpError) as e:
+        cat = Catalogue()
+        r = add_favorite(account, cat, resolve(a.artist, cat, MusicBrainz()))
+    except (ArtistError, DeezerError, HttpError) as e:
         print(f"favorite: {e}")
         return 1
     print(f"favorite: {r['name']} ({r['id']}) " + ("was already a favourite" if r["already"]
                                                    else "is now a favourite; the next run downloads its catalogue"))
+    return 0
+
+
+def cmd_artist(a, cfg: Config) -> int:
+    favourites = set()
+    state, account = check(cfg)
+    if state == "valid":
+        favourites = {f["id"] for f in account.favorite_artists()}
+    print(f"searching Deezer and MusicBrainz for {a.name!r} (MusicBrainz allows one request a second)...")
+    cands, unmatched = search(a.name, Catalogue(), MusicBrainz(), cfg.library, favourites)
+    if not cands:
+        print("no Deezer artist by that name")
+        return 1
+    for c in cands:
+        star = "  * a favourite" if c["favourite"] else ""
+        print(f"\n{c['name']}  Deezer {c['id']}{star}\n  {c['fans']} fans, {c['releases']} releases")
+        if c["latest"]:
+            print("  latest: " + "; ".join(f"{r['title']} ({r['type']}, {r['date']})" for r in c["latest"]))
+        m = c.get("mb")
+        if m:
+            how = "links to this Deezer artist" if m["linked"] else f"{m['common']} release titles in common"
+            print(f"  MusicBrainz {m['id']}: {m['bio'] or 'no details'} ({how})")
+            if m["wikipedia"]:
+                print(f"  Wikipedia: {m['wikipedia']}")
+        elif c.get("mb_error"):
+            print(f"  MusicBrainz: not reached ({c['mb_error']})")
+        for f in c["library"]:
+            print(f"  in your library: {f['path']} ({f['on_deezer']} of its {f['albums']} albums are this artist's)")
+    for f in unmatched:
+        print(f"\nin your library but none of these: {f['path']} ({f['albums']} albums)")
+    print("\nfavourite one with: deemix-helper favorite add <Deezer id>")
     return 0
 
 
@@ -144,12 +180,15 @@ def main(argv=None) -> int:
     s.add_argument("--force", action="store_true", help="renew even though the login works")
     s = sub.add_parser("favorite", help="favourite an artist on the account")
     s.add_argument("action", choices=["add"])
-    s.add_argument("artist", help="exact name, Deezer id or artist URL")
+    s.add_argument("artist", help="Deezer artist id or URL, or MusicBrainz artist id")
+    s = sub.add_parser("artist", help="find an artist's ids")
+    s.add_argument("action", choices=["search"])
+    s.add_argument("name")
     sub.add_parser("status", help="artists followed, latest releases")
     a = p.parse_args(argv)
     cfg = Config.from_env()
     try:
-        return {"run": cmd_run, "follow": cmd_follow, "arl": cmd_arl, "favorite": cmd_favorite,
+        return {"run": cmd_run, "follow": cmd_follow, "arl": cmd_arl, "favorite": cmd_favorite, "artist": cmd_artist,
                 "status": cmd_status}[a.cmd](a, cfg)
     except (DeemixError, DeezerError, HttpError) as e:
         print(f"{a.cmd}: {e}")

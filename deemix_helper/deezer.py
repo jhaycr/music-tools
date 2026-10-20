@@ -19,7 +19,6 @@ API = "https://api.deezer.com"
 CLIENT_ID = "172365"
 CLIENT_SECRET = "fb0bec7ccc063dab0417eb7b0d847f34"
 ARL = re.compile(r"[0-9a-f]{64,}", re.I)
-_ARTIST_URL = re.compile(r"(?:deezer\.com/(?:[a-z]{2}/)?artist/)?(\d+)/?$")
 
 
 class DeezerError(Exception):
@@ -122,16 +121,12 @@ class Catalogue:
             if not data or "next" not in page:
                 return out
 
-    def find_artist(self, query: str) -> dict:
-        """An artist by Deezer id, artist URL, or exact name (case-insensitive)."""
-        m = _ARTIST_URL.search(query.strip())
-        if m:
-            a = self.get(f"/artist/{m.group(1)}")
-            return {"id": int(a["id"]), "name": a["name"]}
-        hits = self.get("/search/artist", {"q": query, "limit": 10}).get("data") or []
-        exact = [h for h in hits if h["name"].casefold() == query.strip().casefold()]
-        if not exact:
-            near = ", ".join(f"{h['name']} ({h['id']})" for h in hits[:5]) or "nothing"
-            raise DeezerError(f"no artist named {query!r} on Deezer; closest: {near}. Pass the id instead")
-        best = max(exact, key=lambda h: h.get("nb_fan") or 0)
-        return {"id": int(best["id"]), "name": best["name"]}
+    def artist(self, artist_id: int) -> dict:
+        a = self.get(f"/artist/{artist_id}")
+        return {"id": int(a["id"]), "name": a["name"], "fans": a.get("nb_fan") or 0,
+                "albums": a.get("nb_album") or 0}
+
+    def search_artists(self, query: str, limit: int = 25) -> list[dict]:
+        hits = self.get("/search/artist", {"q": query, "limit": limit}).get("data") or []
+        return [{"id": int(h["id"]), "name": h["name"], "fans": h.get("nb_fan") or 0,
+                 "albums": h.get("nb_album") or 0} for h in hits]

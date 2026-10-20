@@ -26,6 +26,7 @@ class Config:
     apprise_url: str
     bitrate: str | None
     max_queue: int
+    library: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -39,6 +40,7 @@ class Config:
             apprise_url=e("APPRISE_URL", ""),
             bitrate=e("DH_BITRATE") or None,
             max_queue=int(e("DH_MAX_QUEUE", "100")),
+            library=e("DH_LIBRARY", "/music"),
         )
 
     def credentials(self) -> tuple[str, str] | None:
