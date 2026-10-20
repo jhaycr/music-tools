@@ -2,12 +2,12 @@ import json
 
 import pytest
 
-from deemix_helper import arl as arlmod
-from deemix_helper.config import Config
-from deemix_helper.deemix import Deemix, stored_arl
-from deemix_helper.deezer import CLIENT_ID, CLIENT_SECRET, Account, Catalogue, DeezerError, _md5, arl_from_login
-from deemix_helper.follow import follow, pick
-from deemix_helper.store import Store
+from music_tools import arl as arlmod
+from music_tools.config import Config
+from music_tools.deemix import Deemix, stored_arl
+from music_tools.deezer import CLIENT_ID, CLIENT_SECRET, Account, Catalogue, DeezerError, _md5, arl_from_login
+from music_tools.follow import follow, pick
+from music_tools.store import Store
 
 GOOD = "a" * 192
 NEW = "b" * 192
@@ -169,7 +169,7 @@ def test_a_failed_queue_is_retried(w):
 
     class Broken(Deemix):
         def queue(self, url, bitrate=None):
-            from deemix_helper.deemix import DeemixError
+            from music_tools.deemix import DeemixError
             raise DeemixError("NotLoggedIn")
     out = follow(store, account(w), catalogue(w), Broken("x", FakeHttp(w)), today="2026-10-20", log=lambda *_: None)
     assert out["failed"] and store.release_state(10) == "failed"
@@ -222,7 +222,7 @@ def test_refused_email_login_says_why_without_the_password(w):
 
 
 def test_unreachable_deezer_is_not_a_reason_to_renew(w):
-    from deemix_helper.http import HttpError
+    from music_tools.http import HttpError
 
     class Down(FakeHttp):
         def request(self, *a, **k):
@@ -273,7 +273,7 @@ class ArtistsHttp:
             aid = int(url.rsplit("/", 1)[1])
             return {"id": aid, "name": {2: "She", 5: "Linked Band"}.get(aid, "Someone"), "nb_fan": 1}
         if url.endswith("/ws/2/artist"):
-            assert headers and "deemix-helper" in headers["User-Agent"]
+            assert headers and "music-tools" in headers["User-Agent"]
             return {"artists": [{"id": self.MB_SHE, "name": "she"}, {"id": "x", "name": "S.H.E"}]}
         if "/ws/2/artist/" in url:
             mbid = url.rsplit("/", 1)[1]
@@ -295,13 +295,13 @@ class ArtistsHttp:
 
 
 def artists_env():
-    from deemix_helper.artists import MusicBrainz
+    from music_tools.artists import MusicBrainz
     h = ArtistsHttp()
     return Catalogue(h, min_interval=0), MusicBrainz(h, min_interval=0), h
 
 
 def test_search_tells_same_named_artists_apart(tmp_path):
-    from deemix_helper.artists import search
+    from music_tools.artists import search
     lib = tmp_path / "music"
     for d in ("General/she/Chiptek (2008)", "General/she/Abyss (2016)", "General/She/Trigger (2025)",
               "Family/she/Chiptek (2008)"):
@@ -318,7 +318,7 @@ def test_search_tells_same_named_artists_apart(tmp_path):
 
 
 def test_resolve_takes_ids_and_refuses_names():
-    from deemix_helper.artists import ArtistError, resolve
+    from music_tools.artists import ArtistError, resolve
     cat, mb, h = artists_env()
     assert resolve("https://www.deezer.com/en/artist/2", cat, mb, h)["id"] == 2
     assert resolve("2", cat, mb, h)["id"] == 2
@@ -331,7 +331,7 @@ def test_resolve_takes_ids_and_refuses_names():
 # ---- favourites
 
 def test_favorite_adds_once(w):
-    from deemix_helper.follow import add_favorite
+    from music_tools.follow import add_favorite
     r = add_favorite(account(w), catalogue(w), {"id": 7, "name": "K/DA"})
     assert r == {"id": 7, "name": "K/DA", "already": False} and w.favorited == [7]
     w.favs.append({"ART_ID": "7", "ART_NAME": "K/DA"})

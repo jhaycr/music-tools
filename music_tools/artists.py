@@ -22,7 +22,7 @@ from .follow import norm
 from .http import Http, HttpError
 
 MB = "https://musicbrainz.org/ws/2"
-UA = "deemix-helper/0.1 ( https://github.com/jhaycr/deemix-helper )"
+UA = "music-tools/0.2 ( https://github.com/jhaycr/music-tools )"
 MBID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 DEEZER_ID = re.compile(r"^(?:https?://)?(?:www\.)?(?:deezer\.com/(?:[a-z]{2}/)?artist/)?(\d+)/?$")
 _DEEZER_LINK = re.compile(r"deezer\.com/(?:[a-z]{2}/)?artist/(\d+)")
@@ -202,7 +202,7 @@ def resolve(ref: str, catalogue: Catalogue, mb: MusicBrainz, http: Http | None =
     m = MBID.search(ref)
     if not m:
         raise ArtistError(f"{ref!r} is not a Deezer artist id or a MusicBrainz id. "
-                          f"`deemix-helper artist search {ref}` shows the candidates and their ids")
+                          f"`music-tools artist search {ref}` shows the candidates and their ids")
     try:
         full = mb.artist(m.group(0))
     except HttpError as e:
@@ -223,4 +223,4 @@ def resolve(ref: str, catalogue: Catalogue, mb: MusicBrainz, http: Http | None =
         return scored[0][1]
     near = ", ".join(f"{c['name']} {c['id']} ({n} titles in common)" for n, c in scored[:4]) or "none"
     raise ArtistError(f"MusicBrainz's {full['name']} ({_bio(full) or 'no details'}) has no Deezer link and no "
-                      f"clear match by titles: {near}. Pick one with `artist search` and pass its Deezer id")
+                      f"clear match by titles: {near}. Pick one with `music-tools artist search` and pass its Deezer id")

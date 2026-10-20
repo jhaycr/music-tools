@@ -34,13 +34,13 @@ class Config:
         return cls(
             deemix_url=e("DEEMIX_URL", "http://deemix:6595"),
             login_file=e("DEEMIX_LOGIN", "/deemix/login.json"),
-            db=e("DH_DB", "/config/deemix-helper.db"),
+            db=e("MT_DB", "/config/music-tools.db"),
             email_file=e("DEEZER_EMAIL_FILE", ""),
             password_file=e("DEEZER_PASSWORD_FILE", ""),
             apprise_url=e("APPRISE_URL", ""),
-            bitrate=e("DH_BITRATE") or None,
-            max_queue=int(e("DH_MAX_QUEUE", "100")),
-            library=e("DH_LIBRARY", "/music"),
+            bitrate=e("MT_BITRATE") or None,
+            max_queue=int(e("MT_MAX_QUEUE", "100")),
+            library=e("MT_LIBRARY", "/music"),
         )
 
     def credentials(self) -> tuple[str, str] | None:

@@ -1,14 +1,14 @@
-"""deemix-helper: small tools around a deemix server, one-shot and cron-friendly.
+"""music-tools: small one-shot tools for a self-hosted music library, cron-friendly.
 
-  run                      arl ensure, then follow: what cron runs
-  follow [--dry-run]       queue new releases of the account's favourite artists
-  arl check                does deemix's stored Deezer login still work?
-  arl renew [--force]      make a new ARL from the email and password, hand it to deemix
-  artist search NAME       Deezer artists of that name, told apart: latest releases,
-                           MusicBrainz match and bio, the library folder that is theirs
-  favorite add ID          favourite an artist: a Deezer artist id or URL, or a
-                           MusicBrainz artist id (never a name)
-  status                   artists followed and the latest releases queued
+  deemix run                   deemix arl renew if needed, then deemix follow: what cron runs
+  deemix follow [--dry-run]    queue new releases of the Deezer account's favourite artists
+  deemix arl check             does deemix's stored Deezer login still work?
+  deemix arl renew [--force]   make a new ARL from the email and password, hand it to deemix
+  deemix favorite add ID       favourite an artist: a Deezer artist id or URL, or a
+                               MusicBrainz artist id (never a name)
+  deemix status                artists followed and the latest releases queued
+  artist search NAME           Deezer artists of that name, told apart: latest releases,
+                               MusicBrainz match and bio, the library folder that is theirs
 """
 from __future__ import annotations
 
@@ -49,10 +49,10 @@ def cmd_arl(a, cfg: Config) -> int:
         _, renewed = ensure(cfg, force=a.force)
     except RenewError as e:
         print(f"arl: NOT renewed: {e}")
-        _alert(cfg, store, "deemix-helper: deemix's Deezer login is broken", str(e))
+        _alert(cfg, store, "music-tools: deemix's Deezer login is broken", str(e))
         return 1
     if renewed:
-        notify(cfg.apprise_url, "deemix-helper", "deemix's Deezer login was renewed from the account's email")
+        notify(cfg.apprise_url, "music-tools", "deemix's Deezer login was renewed from the account's email")
     else:
         print("arl: deemix's login works; nothing to do (--force renews anyway)")
     return 0
@@ -65,10 +65,10 @@ def _follow(cfg: Config, store: Store, account, dry_run: bool) -> int:
     print(f"follow: {out['artists']} favourite artists, {verb} {len(out['queued'])}, "
           f"{len(out['failed'])} failed, {out['deferred']} left for the next run")
     if out["queued"] and not dry_run:
-        notify(cfg.apprise_url, f"deemix-helper: {len(out['queued'])} new releases downloading",
+        notify(cfg.apprise_url, f"music-tools: {len(out['queued'])} new releases downloading",
                "\n".join(out["queued"][:40]) + (f"\n... and {len(out['queued']) - 40} more" if len(out["queued"]) > 40 else ""))
     if out["failed"] and not dry_run:
-        _alert(cfg, store, "deemix-helper: some releases did not queue", "\n".join(out["failed"][:20]))
+        _alert(cfg, store, "music-tools: some releases did not queue", "\n".join(out["failed"][:20]))
     return 1 if out["failed"] else 0
 
 
@@ -76,27 +76,27 @@ def cmd_follow(a, cfg: Config) -> int:
     store = Store(cfg.db)
     state, account = check(cfg)
     if state != "valid":
-        print(f"follow: deemix's Deezer login is {state}; `arl renew` (or `run`) fixes that")
+        print(f"follow: deemix's Deezer login is {state}; `music-tools deemix arl renew` (or `deemix run`) fixes that")
         return 1
     return _follow(cfg, store, account, a.dry_run)
 
 
 def cmd_run(a, cfg: Config) -> int:
-    print(f"deemix-helper run {now()}")
+    print(f"music-tools run {now()}")
     store = Store(cfg.db)
     try:
         account, renewed = ensure(cfg)
     except RenewError as e:
         print(f"arl: NOT renewed: {e}")
-        _alert(cfg, store, "deemix-helper: deemix's Deezer login is broken", str(e))
+        _alert(cfg, store, "music-tools: deemix's Deezer login is broken", str(e))
         return 1
     if renewed:
-        notify(cfg.apprise_url, "deemix-helper", "deemix's Deezer login was renewed from the account's email")
+        notify(cfg.apprise_url, "music-tools", "deemix's Deezer login was renewed from the account's email")
     try:
         rc = _follow(cfg, store, account, dry_run=False)
     except (DeezerError, HttpError) as e:
         print(f"follow: {e}")
-        _alert(cfg, store, "deemix-helper: follow failed", str(e))
+        _alert(cfg, store, "music-tools: follow failed", str(e))
         return 1
     if rc == 0:
         _clear_alert(store)
@@ -106,7 +106,7 @@ def cmd_run(a, cfg: Config) -> int:
 def cmd_favorite(a, cfg: Config) -> int:
     state, account = check(cfg)
     if state != "valid":
-        print(f"favorite: deemix's Deezer login is {state}; `arl renew` fixes that")
+        print(f"favorite: deemix's Deezer login is {state}; `music-tools deemix arl renew` fixes that")
         return 1
     try:
         cat = Catalogue()
@@ -146,7 +146,7 @@ def cmd_artist(a, cfg: Config) -> int:
             print(f"  in your library: {f['path']} ({f['on_deezer']} of its {f['albums']} albums are this artist's)")
     for f in unmatched:
         print(f"\nin your library but none of these: {f['path']} ({f['albums']} albums)")
-    print("\nfavourite one with: deemix-helper favorite add <Deezer id>")
+    print("\nfavourite one with: music-tools deemix favorite add <Deezer id>")
     return 0
 
 
@@ -169,10 +169,12 @@ def cmd_status(a, cfg: Config) -> int:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="deemix-helper", description=__doc__,
+    p = argparse.ArgumentParser(prog="music-tools", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("run", help="arl ensure, then follow")
+    tools = p.add_subparsers(dest="tool", required=True)
+    dz = tools.add_parser("deemix", help="follow favourite artists; keep deemix logged in")
+    sub = dz.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("run", help="arl renew if needed, then follow")
     s = sub.add_parser("follow", help="queue new releases of favourite artists")
     s.add_argument("--dry-run", action="store_true", help="say what would be queued; change nothing")
     s = sub.add_parser("arl", help="check or renew deemix's Deezer login")
@@ -181,19 +183,21 @@ def main(argv=None) -> int:
     s = sub.add_parser("favorite", help="favourite an artist on the account")
     s.add_argument("action", choices=["add"])
     s.add_argument("artist", help="Deezer artist id or URL, or MusicBrainz artist id")
-    s = sub.add_parser("artist", help="find an artist's ids")
-    s.add_argument("action", choices=["search"])
-    s.add_argument("name")
     sub.add_parser("status", help="artists followed, latest releases")
+    ar = tools.add_parser("artist", help="find an artist's ids")
+    sub = ar.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("search", help="Deezer artists of that name, told apart")
+    s.add_argument("name")
     a = p.parse_args(argv)
     cfg = Config.from_env()
+    handlers = {("deemix", "run"): cmd_run, ("deemix", "follow"): cmd_follow, ("deemix", "arl"): cmd_arl,
+                ("deemix", "favorite"): cmd_favorite, ("deemix", "status"): cmd_status,
+                ("artist", "search"): cmd_artist}
     try:
-        return {"run": cmd_run, "follow": cmd_follow, "arl": cmd_arl, "favorite": cmd_favorite, "artist": cmd_artist,
-                "status": cmd_status}[a.cmd](a, cfg)
+        return handlers[(a.tool, a.cmd)](a, cfg)
     except (DeemixError, DeezerError, HttpError) as e:
-        print(f"{a.cmd}: {e}")
+        print(f"{a.tool} {a.cmd}: {e}")
         return 1
-
 
 if __name__ == "__main__":
     sys.exit(main())
