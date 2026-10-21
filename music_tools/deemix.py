@@ -29,9 +29,15 @@ def stored_arl(login_file: str) -> str | None:
 
 
 class Deemix:
-    def __init__(self, url: str, http: Http | None = None):
+    """`arl`, when given, logs this session in before its first queue: deemix's
+    queue belongs to a logged-in session. Pass only an ARL that has just
+    logged in to Deezer (see above)."""
+
+    def __init__(self, url: str, http: Http | None = None, arl: str | None = None):
         self.url = url.rstrip("/")
         self.http = http or Http(timeout=120)
+        self.arl = arl
+        self._logged_in = False
 
     def login(self, arl: str) -> None:
         r = self.http.request("POST", self.url + "/api/loginArl", body={"arl": arl})
@@ -41,6 +47,9 @@ class Deemix:
                               + (f", {r.get('error')}" if isinstance(r, dict) and r.get("error") else "") + ")")
 
     def queue(self, url: str, bitrate: str | None = None) -> None:
+        if self.arl and not self._logged_in:
+            self.login(self.arl)
+            self._logged_in = True
         r = self.http.request("POST", self.url + "/api/addToQueue",
                               body={"url": url, "bitrate": bitrate or "null"})
         if not (isinstance(r, dict) and r.get("result")):

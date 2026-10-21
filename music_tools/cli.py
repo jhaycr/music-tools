@@ -19,7 +19,7 @@ import sys
 from .arl import RenewError, check, ensure
 from .artists import ArtistError, MusicBrainz, resolve, search
 from .config import Config
-from .deemix import Deemix, DeemixError
+from .deemix import Deemix, DeemixError, stored_arl
 from .deezer import Catalogue, DeezerError
 from .follow import add_favorite, follow
 from .http import Http, HttpError
@@ -73,7 +73,9 @@ def cmd_arl(a, cfg: Config) -> int:
 
 
 def _follow(cfg: Config, store: Store, account, dry_run: bool) -> int:
-    out = follow(store, account, Catalogue(), None if dry_run else Deemix(cfg.deemix_url, Http(timeout=120)),
+    # The stored ARL has just logged in to Deezer (check/ensure), so it is safe to hand deemix.
+    deemix = None if dry_run else Deemix(cfg.deemix_url, Http(timeout=120), arl=stored_arl(cfg.login_file))
+    out = follow(store, account, Catalogue(), deemix,
                  max_queue=cfg.max_queue, bitrate=cfg.bitrate, dry_run=dry_run,
                  log=lambda m: log.info("deemix", m), err=lambda m: log.error("deemix", m))
     verb = "would queue" if dry_run else "queued"

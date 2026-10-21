@@ -74,12 +74,16 @@ class FakeHttp:
             return {"data": [{"id": 7, "name": "K/DA", "nb_fan": 9}, {"id": 8, "name": "KDA Fans", "nb_fan": 1}]}
         if url.endswith("/api/loginArl"):
             ok = body["arl"] in w.valid
+            self.deemix_session = ok
+            w.deemix_logins = getattr(w, "deemix_logins", 0) + 1
             if ok and w.deemix_saves:
                 w.login_file.write_text(json.dumps({"arl": body["arl"]}))
             if not ok:
                 w.login_file.write_text(json.dumps({"arl": None}))  # deemix wipes it
             return {"status": 1 if ok else 0}
         if url.endswith("/api/addToQueue"):
+            if not getattr(self, "deemix_session", False):  # deemix queues for a logged-in session only
+                return {"result": False, "errid": "NotLoggedIn"}
             w.queued.append(body["url"])
             return {"result": True}
         raise AssertionError(f"unexpected {method} {url}")
@@ -131,7 +135,7 @@ def test_pick_types_future_and_duplicates():
 
 def test_first_run_baselines_then_new_release_and_new_artist(w):
     store = Store(":memory:")
-    out = follow(store, account(w), catalogue(w), Deemix("http://deemix:6595", FakeHttp(w)), today="2026-10-20",
+    out = follow(store, account(w), catalogue(w), Deemix("http://deemix:6595", FakeHttp(w), arl=GOOD), today="2026-10-20",
                  log=lambda *_: None)
     assert out["queued"] == [] and w.queued == [] and store.release_state(10) == "baseline"
     # a new release from the old favourite, and a new favourite with a catalogue
@@ -139,11 +143,11 @@ def test_first_run_baselines_then_new_release_and_new_artist(w):
     w.favs.append({"ART_ID": "2", "ART_NAME": "New Band"})
     w.albums[2] = [rel(20, "Debut", "album", "2019-05-05"), rel(21, "Debut", "album", "2019-05-05", True),
                    rel(22, "Next", "single", "2099-01-01")]
-    out = follow(store, account(w), catalogue(w), Deemix("http://deemix:6595", FakeHttp(w)), today="2026-10-20",
+    out = follow(store, account(w), catalogue(w), Deemix("http://deemix:6595", FakeHttp(w), arl=GOOD), today="2026-10-20",
                  log=lambda *_: None)
     assert w.queued == ["https://www.deezer.com/album/11", "https://www.deezer.com/album/21"]
     assert store.artist(2)["mode"] == "backfill" and store.release_state(22) is None
-    follow(store, account(w), catalogue(w), Deemix("http://deemix:6595", FakeHttp(w)), today="2026-10-20",
+    follow(store, account(w), catalogue(w), Deemix("http://deemix:6595", FakeHttp(w), arl=GOOD), today="2026-10-20",
            log=lambda *_: None)
     assert len(w.queued) == 2, "nothing twice"
 
@@ -155,10 +159,10 @@ def test_dry_run_changes_nothing_and_limit_defers(w):
     out = follow(store, account(w), catalogue(w), None, max_queue=3, dry_run=True, today="2026-10-20",
                  log=lambda *_: None)
     assert len(out["queued"]) == 3 and out["deferred"] == 2 and store.artist(1) is None and w.queued == []
-    out = follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w)), max_queue=3, today="2026-10-20",
+    out = follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w), arl=GOOD), max_queue=3, today="2026-10-20",
                  log=lambda *_: None)
     assert len(w.queued) == 3 and out["deferred"] == 2
-    follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w)), max_queue=3, today="2026-10-20",
+    follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w), arl=GOOD), max_queue=3, today="2026-10-20",
            log=lambda *_: None)
     assert len(w.queued) == 5
 
@@ -173,15 +177,15 @@ def test_a_failed_queue_is_retried(w):
             raise DeemixError("NotLoggedIn")
     out = follow(store, account(w), catalogue(w), Broken("x", FakeHttp(w)), today="2026-10-20", log=lambda *_: None)
     assert out["failed"] and store.release_state(10) == "failed"
-    follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w)), today="2026-10-20", log=lambda *_: None)
+    follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w), arl=GOOD), today="2026-10-20", log=lambda *_: None)
     assert w.queued == ["https://www.deezer.com/album/10"] and store.release_state(10) == "queued"
 
 
 def test_a_later_listing_of_the_same_title_is_skipped(w):
     store = Store(":memory:")
-    follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w)), today="2026-10-20", log=lambda *_: None)
+    follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w), arl=GOOD), today="2026-10-20", log=lambda *_: None)
     w.albums[1].append(rel(12, "First", "album", "2026-10-01", True))  # an explicit version listed later
-    follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w)), today="2026-10-20", log=lambda *_: None)
+    follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w), arl=GOOD), today="2026-10-20", log=lambda *_: None)
     assert w.queued == [] and store.release_state(12) == "skipped"
 
 
@@ -446,3 +450,14 @@ def test_follow_and_favorite_refuse_cleanly_without_a_login(cli, w, capsys):
     assert run("deemix", "follow") == 1 and run("deemix", "favorite", "add", "7") == 1
     errs = errors(capsys.readouterr().out)
     assert len(errs) == 2 and all("login is invalid" in e for e in errs)
+
+
+def test_run_logs_deemix_in_before_queueing_and_only_once(cli, w, capsys):
+    run, _ = cli
+    assert run("run") == 0  # the first run: a baseline
+    w.favs.append({"ART_ID": "2", "ART_NAME": "New Band"})
+    w.albums[2] = [rel(20, "Debut", "album", "2019-05-05"), rel(21, "Next", "single", "2020-01-01")]
+    assert run("run") == 0, capsys.readouterr().out
+    assert w.queued == ["https://www.deezer.com/album/20", "https://www.deezer.com/album/21"]
+    assert w.deemix_logins == 1, "one deemix login per run, only when something is queued"
+    assert stored_arl(str(w.login_file)) == GOOD
