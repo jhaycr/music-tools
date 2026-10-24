@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -94,14 +95,14 @@ def w(tmp_path):
     return World(tmp_path)
 
 
-def cfg(w, creds=True, tmp=None):
+def cfg(w, creds=True, tmp=None, keep=False):
     d = w.login_file.parent
     if creds:
         (d / "email").write_text("me@example.com\n")
         (d / "password").write_text("pw\n")
     return Config(deemix_url="http://deemix:6595", login_file=str(w.login_file), db=str(d / "db.sqlite"),
                   email_file=str(d / "email") if creds else "", password_file=str(d / "password") if creds else "",
-                  apprise_url="", bitrate=None, max_queue=100)
+                  apprise_url="", bitrate=None, max_queue=100, keep_file=str(d / "kept") if keep else "")
 
 
 def factory(w):
@@ -241,6 +242,44 @@ def test_deemix_must_actually_save_it(w):
         arlmod.ensure(cfg(w), http=factory(w), log=lambda *_: None)
 
 
+def test_a_working_login_is_kept_owner_only(w):
+    c = cfg(w, keep=True)
+    arlmod.ensure(c, http=factory(w), log=lambda *_: None)
+    assert arlmod.kept_arl(c) == GOOD
+    assert (os.stat(c.keep_file).st_mode & 0o777) == 0o600
+
+
+def test_a_wiped_login_is_restored_from_the_kept_one(w):
+    c = cfg(w, keep=True)
+    arlmod.ensure(c, http=factory(w), log=lambda *_: None)
+    w.login_file.write_text(json.dumps({"arl": None}))  # a failed loginArl wiped it; the ARL still works
+    acct, done = arlmod.ensure(c, http=factory(w), log=lambda *_: None)
+    assert done == "restored" and acct.user["USER_ID"] == 42
+    assert stored_arl(str(w.login_file)) == GOOD
+    assert not any(c[0].endswith("/auth/token") for c in w.calls), "no email login needed"
+
+
+def test_a_kept_login_that_no_longer_works_falls_back_to_renewal(w):
+    c = cfg(w, keep=True)
+    arlmod.ensure(c, http=factory(w), log=lambda *_: None)
+    w.valid = {NEW}
+    acct, done = arlmod.ensure(c, http=factory(w), log=lambda *_: None)
+    assert done == "renewed" and stored_arl(str(w.login_file)) == NEW == arlmod.kept_arl(c)
+
+
+def test_a_refused_email_login_says_how_to_fix_it(w):
+    from music_tools.http import HttpError
+
+    class Blocked(FakeHttp):
+        def request(self, method, url, *a, **k):
+            if url.endswith("/auth/token"):
+                raise HttpError("api.deezer.com: HTTP 403")
+            return super().request(method, url, *a, **k)
+    w.valid = {NEW}
+    with pytest.raises(arlmod.RenewError, match="HTTP 403; log deemix in with a fresh ARL"):
+        arlmod.ensure(cfg(w), http=lambda timeout=30: Blocked(w), log=lambda *_: None)
+
+
 def test_arl_from_login_rejects_garbage(w):
     w.issue = "not-an-arl"
     with pytest.raises(DeezerError, match="no ARL"):
@@ -357,6 +396,7 @@ def cli(w, monkeypatch):
     monkeypatch.setenv("MT_DB", str(d / "state.db"))
     monkeypatch.setenv("APPRISE_URL", "http://apprise/notify/x")
     monkeypatch.setenv("MT_LIBRARY", str(d / "no-library"))
+    monkeypatch.setenv("MT_ARL_KEEP", str(d / "kept"))
     for k in ("DEEZER_EMAIL_FILE", "DEEZER_PASSWORD_FILE"):
         monkeypatch.delenv(k, raising=False)
 
@@ -461,3 +501,30 @@ def test_run_logs_deemix_in_before_queueing_and_only_once(cli, w, capsys):
     assert w.queued == ["https://www.deezer.com/album/20", "https://www.deezer.com/album/21"]
     assert w.deemix_logins == 1, "one deemix login per run, only when something is queued"
     assert stored_arl(str(w.login_file)) == GOOD
+
+
+def test_a_deemix_login_that_fails_once_heals_on_the_next_run(cli, w, capsys):
+    """2026-10-22: deemix's loginArl failed during a run, wiping its stored login while the
+    ARL still worked, and the new release was never downloaded."""
+    run, sent = cli
+    assert run("run") == 0  # baseline, and the working ARL is kept
+    w.albums[1].append(rel(11, "Second", "single", "2020-02-02"))
+    flaky = {"left": 1}
+    real = FakeHttp.request
+
+    def once(self, method, url, params=None, body=None, headers=None):
+        if url.endswith("/api/loginArl") and flaky["left"]:
+            flaky["left"] -= 1
+            w.login_file.write_text(json.dumps({"arl": None}))  # deemix wipes it
+            return {"status": 0}
+        return real(self, method, url, params, body, headers)
+    FakeHttp.request = once
+    try:
+        assert run("run") == 1 and w.queued == []
+        assert stored_arl(str(w.login_file)) is None
+        assert run("run") == 0, capsys.readouterr().out
+    finally:
+        FakeHttp.request = real
+    assert w.queued == ["https://www.deezer.com/album/11"]
+    assert stored_arl(str(w.login_file)) == GOOD
+    assert any("last one that worked was put back" in m for m in sent)

@@ -43,13 +43,15 @@ def _clear_alert(store: Store) -> None:
 def _login(cfg: Config, store: Store, force: bool = False):
     """deemix's Deezer account, renewing the login if it must. None (logged as an ERROR) when it can't."""
     try:
-        account, renewed = ensure(cfg, force=force, log=lambda m: log.info("deemix", m))
+        account, done = ensure(cfg, force=force, log=lambda m: log.info("deemix", m))
     except RenewError as e:
         log.error("deemix", f"login: {e}")
         _alert(cfg, store, "music-tools: deemix's Deezer login is broken", str(e))
         return None
-    if renewed:
+    if done == "renewed":
         notify(cfg.apprise_url, "music-tools", "deemix's Deezer login was renewed from the account's email")
+    elif done == "restored":
+        notify(cfg.apprise_url, "music-tools", "deemix had lost its Deezer login; the last one that worked was put back")
     elif cfg.credentials_problem():
         log.warn("deemix", f"login works, but can't be renewed when it expires: {cfg.credentials_problem()}")
     return account

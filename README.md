@@ -40,7 +40,7 @@ services:
     user: 1000:1000
     restart: "no"            # a one-shot: cron starts it (docker start -a music-tools)
     volumes:
-      - ./music-tools:/config                    # its state (SQLite)
+      - ./music-tools:/config                    # its state (SQLite) and the kept login
       - ./deemix/config:/deemix:ro               # deemix's config folder, for login.json
       - ./music:/music:ro                        # optional: the library, for artist search
       - ./secrets/deezer-email:/run/secrets/deezer-email:ro
@@ -152,19 +152,25 @@ the web UI.
 
 ## How the login renewal works
 
-1. Each run checks deemix's stored ARL (`login.json`) against Deezer.
+1. Each run checks deemix's stored ARL (`login.json`) against Deezer. One
+   that logs in is kept in `MT_ARL_KEEP` (owner-only).
 2. If Deezer can't be reached, nothing happens: that is not an expired login.
-3. If Deezer says the ARL no longer logs in, music-tools logs in with the
-   email and password the way deemix's own email login does, and gets a new
-   ARL.
-4. It checks the new ARL logs in, and only then gives it to deemix
+3. If deemix's login is gone or no longer logs in, but the kept ARL still
+   does, deemix is given the kept one back. Any failed `/api/loginArl`, even
+   a passing network error inside deemix, makes deemix forget its stored
+   login while the ARL itself is still good; this undoes that on the next run.
+4. Otherwise music-tools logs in with the email and password the way deemix's
+   own email login does, and gets a new ARL.
+5. It checks the new ARL logs in, and only then gives it to deemix
    (`/api/loginArl`). In single-user mode deemix saves it. Giving deemix an ARL
-   that fails would make deemix forget its stored login, which is why step 4
+   that fails would make deemix forget its stored login, which is why step 5
    checks first.
-5. It confirms deemix saved it.
+6. It confirms deemix saved it.
 
 An account with two-factor sign-in, or one Deezer asks to solve a captcha,
-can't log in this way; renewal then fails and says why.
+can't log in this way, and Deezer sometimes refuses it outright (HTTP 403).
+Renewal then fails and says why: log deemix in with a fresh ARL from a
+browser (the `arl` cookie on deezer.com), and the next run keeps that one.
 
 The ARL, the password and the access token are never logged or printed. The
 email and password are read from files, so `docker inspect` doesn't show them.
@@ -176,6 +182,7 @@ email and password are read from files, so `docker inspect` doesn't show them.
 | `DEEMIX_URL` | `http://deemix:6595` | deemix's web server |
 | `DEEMIX_LOGIN` | `/deemix/login.json` | deemix's stored login |
 | `MT_DB` | `/config/music-tools.db` | state |
+| `MT_ARL_KEEP` | `/config/last-good-arl` | the last ARL that logged in, to restore a wiped login |
 | `DEEZER_EMAIL_FILE`, `DEEZER_PASSWORD_FILE` | unset | the account, for renewal |
 | `MT_BITRATE` | deemix's own | e.g. `9` FLAC, `3` MP3 320 |
 | `MT_MAX_QUEUE` | `100` | releases queued per run |

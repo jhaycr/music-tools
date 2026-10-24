@@ -27,6 +27,7 @@ class Config:
     bitrate: str | None
     max_queue: int
     library: str = ""
+    keep_file: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -41,6 +42,7 @@ class Config:
             bitrate=e("MT_BITRATE") or None,
             max_queue=int(e("MT_MAX_QUEUE", "100")),
             library=e("MT_LIBRARY", "/music"),
+            keep_file=e("MT_ARL_KEEP", "/config/last-good-arl"),
         )
 
     def credentials_problem(self) -> str | None:

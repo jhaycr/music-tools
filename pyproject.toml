@@ -1,6 +1,6 @@
 [project]
 name = "music-tools"
-version = "0.3.1"
+version = "0.3.2"
 description = "Small one-shot tools for a self-hosted music library: follow favourite Deezer artists, keep deemix logged in"
 requires-python = ">=3.11"
 dependencies = []
