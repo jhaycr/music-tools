@@ -24,7 +24,12 @@ FIX = "log deemix in with a fresh ARL from a browser (the arl cookie on deezer.c
 
 
 class RenewError(Exception):
-    pass
+    """`blocked`: Deezer refused the email login itself (HTTP 403), not the password.
+    Trying again every hour won't help, so the caller backs off."""
+
+    def __init__(self, msg: str, blocked: bool = False):
+        super().__init__(msg)
+        self.blocked = blocked
 
 
 def kept_arl(cfg: Config) -> str | None:
@@ -91,9 +96,11 @@ def _restore(cfg: Config, state: str, http, log) -> Account | None:
     return account
 
 
-def ensure(cfg: Config, force: bool = False, http=None, log=print) -> tuple[Account, str]:
+def ensure(cfg: Config, force: bool = False, http=None, log=print,
+           email_blocked: str | None = None) -> tuple[Account, str]:
     """A logged-in account, putting a working ARL back in deemix first if it has to.
-    Returns (account, what was done: '' | 'restored' | 'renewed')."""
+    Returns (account, what was done: '' | 'restored' | 'renewed').
+    `email_blocked`: why the email login is not to be tried now (it was refused lately)."""
     http = http or Http
     state, account = check(cfg, http)
     if state == "valid" and not force:
@@ -109,9 +116,17 @@ def ensure(cfg: Config, force: bool = False, http=None, log=print) -> tuple[Acco
     if not creds:
         raise RenewError(f"deemix's Deezer login is {state}, and it can't be renewed: no email and password "
                          f"are configured ({cfg.credentials_problem()}); {FIX}")
+    if email_blocked and not force:
+        raise RenewError(f"deemix's Deezer login is {state}; {email_blocked}; {FIX}", blocked=True)
     log(f"arl: deemix's login is {state}; logging in with the account's email and password")
     try:
-        arl = arl_from_login(*creds, http=http())
+        try:
+            arl = arl_from_login(*creds, http=http())
+        except HttpError as e:
+            if "HTTP 403" not in str(e):
+                raise
+            raise RenewError(f"Deezer blocked the email login ({e}): it refuses this kind of login, "
+                             f"not the password; {FIX}", blocked=True) from None
         fresh = Account(arl, http())
         if not fresh.login():
             raise RenewError(f"Deezer gave a new ARL that doesn't log in; deemix left as it was; {FIX}")

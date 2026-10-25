@@ -91,6 +91,8 @@ outright (logged with its traceback), never stops the others, and `run` exits
 | deemix's login works, email/password not configured | `WARN` each run naming the missing setting; following carries on |
 | login expired or missing, no email/password | `ERROR` naming what is missing (the variable, or the empty file); nothing is queued; deemix's stored login is left alone |
 | login expired, wrong password | `ERROR` with Deezer's own reason; deemix left alone |
+| login expired, Deezer blocks the email login (HTTP 403) | `ERROR` saying so and how to fix it by hand; not tried again for a day; one alert while it lasts |
+| deemix's session won't log in while queueing | `ERROR`; deemix's login, which that wiped, is put back in the same run; the releases queue next run |
 | Deezer can't be reached | `ERROR`; no renewal attempted (an outage is not an expired login) |
 | a release deemix won't queue | `ERROR` for that release; the rest queue; it is tried again next run |
 | `artist search` without a working login | `WARN`; the search runs, favourites just aren't marked |
@@ -158,7 +160,10 @@ the web UI.
 3. If deemix's login is gone or no longer logs in, but the kept ARL still
    does, deemix is given the kept one back. Any failed `/api/loginArl`, even
    a passing network error inside deemix, makes deemix forget its stored
-   login while the ARL itself is still good; this undoes that on the next run.
+   login while the ARL itself is still good; this undoes that. When it
+   happens while queueing, deemix is given the kept ARL back in the same run
+   (and its session is not retried once per release, which would wipe it
+   again each time); the releases are queued next run.
 4. Otherwise music-tools logs in with the email and password the way deemix's
    own email login does, and gets a new ARL.
 5. It checks the new ARL logs in, and only then gives it to deemix
@@ -171,6 +176,8 @@ An account with two-factor sign-in, or one Deezer asks to solve a captcha,
 can't log in this way, and Deezer sometimes refuses it outright (HTTP 403).
 Renewal then fails and says why: log deemix in with a fresh ARL from a
 browser (the `arl` cookie on deezer.com), and the next run keeps that one.
+After a 403 the email login isn't tried again for a day (retrying every hour
+won't change Deezer's mind); `music-tools deemix arl renew --force` tries now.
 
 The ARL, the password and the access token are never logged or printed. The
 email and password are read from files, so `docker inspect` doesn't show them.

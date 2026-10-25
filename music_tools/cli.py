@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timedelta, timezone
 
-from .arl import RenewError, check, ensure
+from .arl import FIX, RenewError, check, ensure
 from .artists import ArtistError, MusicBrainz, resolve, search
 from .config import Config
 from .deemix import Deemix, DeemixError, stored_arl
@@ -25,7 +26,10 @@ from .follow import add_favorite, follow
 from .http import Http, HttpError
 from .notify import notify
 from . import log
-from .store import Store
+from .store import Store, now
+
+# After Deezer blocks the email login (HTTP 403), wait this long before trying it again.
+EMAIL_BACKOFF_HOURS = 24
 
 
 def _alert(cfg: Config, store: Store, title: str, body: str) -> None:
@@ -40,13 +44,30 @@ def _clear_alert(store: Store) -> None:
         store.set_meta("last_alert", "")
 
 
+def _email_blocked(store: Store) -> str | None:
+    """Why the email login is not to be tried yet, or None."""
+    at = store.get_meta("email_blocked_at")
+    if not at:
+        return None
+    until = datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) + timedelta(hours=EMAIL_BACKOFF_HOURS)
+    if datetime.now(timezone.utc) >= until:
+        return None
+    return (f"Deezer blocked the email login at {at}, so it is not tried again until "
+            f"{until.strftime('%Y-%m-%dT%H:%M:%SZ')} (`music-tools deemix arl renew --force` tries now)")
+
+
 def _login(cfg: Config, store: Store, force: bool = False):
     """deemix's Deezer account, renewing the login if it must. None (logged as an ERROR) when it can't."""
     try:
-        account, done = ensure(cfg, force=force, log=lambda m: log.info("deemix", m))
+        account, done = ensure(cfg, force=force, log=lambda m: log.info("deemix", m),
+                               email_blocked=_email_blocked(store))
     except RenewError as e:
+        if e.blocked and not _email_blocked(store):
+            store.set_meta("email_blocked_at", now())
         log.error("deemix", f"login: {e}")
-        _alert(cfg, store, "music-tools: deemix's Deezer login is broken", str(e))
+        # One alert for a blocked email login, however its wording changes while it lasts.
+        _alert(cfg, store, "music-tools: deemix's Deezer login is broken",
+               f"Deezer blocks the email login, so the expired login can't be renewed; {FIX}" if e.blocked else str(e))
         return None
     if done == "renewed":
         notify(cfg.apprise_url, "music-tools", "deemix's Deezer login was renewed from the account's email")
@@ -88,6 +109,11 @@ def _follow(cfg: Config, store: Store, account, dry_run: bool) -> int:
                "\n".join(out["queued"][:40]) + (f"\n... and {len(out['queued']) - 40} more" if len(out["queued"]) > 40 else ""))
     if out["failed"] and not dry_run:
         _alert(cfg, store, "music-tools: some releases did not queue", "\n".join(out["failed"][:20]))
+    if deemix and deemix.login_failed:
+        # deemix wiped its stored login when its own login failed; put the kept one back now,
+        # not an hour from now. The releases are tried again next run.
+        log.error("deemix", f"deemix's session didn't log in ({deemix.login_failed}); putting its login back")
+        _login(cfg, store)
     return 1 if out["failed"] else 0
 
 

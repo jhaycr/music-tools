@@ -276,8 +276,10 @@ def test_a_refused_email_login_says_how_to_fix_it(w):
                 raise HttpError("api.deezer.com: HTTP 403")
             return super().request(method, url, *a, **k)
     w.valid = {NEW}
-    with pytest.raises(arlmod.RenewError, match="HTTP 403; log deemix in with a fresh ARL"):
+    with pytest.raises(arlmod.RenewError, match=r"blocked the email login \(api.deezer.com: HTTP 403\).*"
+                                                 r"log deemix in with a fresh ARL") as e:
         arlmod.ensure(cfg(w), http=lambda timeout=30: Blocked(w), log=lambda *_: None)
+    assert e.value.blocked
 
 
 def test_arl_from_login_rejects_garbage(w):
@@ -503,28 +505,66 @@ def test_run_logs_deemix_in_before_queueing_and_only_once(cli, w, capsys):
     assert stored_arl(str(w.login_file)) == GOOD
 
 
-def test_a_deemix_login_that_fails_once_heals_on_the_next_run(cli, w, capsys):
+def flaky_deemix_login(w, times=1):
+    """deemix's loginArl fails `times` times, wiping its stored login, as on 2026-10-22."""
+    left = {"n": times}
+    real = FakeHttp.request
+
+    def request(self, method, url, params=None, body=None, headers=None):
+        if url.endswith("/api/loginArl") and left["n"]:
+            left["n"] -= 1
+            w.deemix_logins = getattr(w, "deemix_logins", 0) + 1
+            w.login_file.write_text(json.dumps({"arl": None}))  # deemix wipes it
+            return {"status": 0}
+        return real(self, method, url, params, body, headers)
+    return request
+
+
+def test_a_deemix_login_that_fails_is_put_back_in_the_same_run(cli, w, monkeypatch, capsys):
     """2026-10-22: deemix's loginArl failed during a run, wiping its stored login while the
     ARL still worked, and the new release was never downloaded."""
     run, sent = cli
     assert run("run") == 0  # baseline, and the working ARL is kept
-    w.albums[1].append(rel(11, "Second", "single", "2020-02-02"))
-    flaky = {"left": 1}
+    w.albums[1] += [rel(11, "Second", "single", "2020-02-02"), rel(12, "Third", "single", "2020-03-03")]
+    monkeypatch.setattr(FakeHttp, "request", flaky_deemix_login(w))
+    assert run("run") == 1 and w.queued == []
+    out = capsys.readouterr().out
+    assert "putting its login back" in out and "restored; deemix saved the login again" in out
+    assert stored_arl(str(w.login_file)) == GOOD, "not left wiped until the next run"
+    assert w.deemix_logins == 2, "the failed one, then the restore: never once per release"
+    assert any("last one that worked was put back" in m for m in sent)
+    assert run("run") == 0, capsys.readouterr().out
+    assert w.queued == ["https://www.deezer.com/album/11", "https://www.deezer.com/album/12"]
+
+
+def blocked_email_login(w):
+    from music_tools.http import HttpError
     real = FakeHttp.request
 
-    def once(self, method, url, params=None, body=None, headers=None):
-        if url.endswith("/api/loginArl") and flaky["left"]:
-            flaky["left"] -= 1
-            w.login_file.write_text(json.dumps({"arl": None}))  # deemix wipes it
-            return {"status": 0}
-        return real(self, method, url, params, body, headers)
-    FakeHttp.request = once
-    try:
-        assert run("run") == 1 and w.queued == []
-        assert stored_arl(str(w.login_file)) is None
-        assert run("run") == 0, capsys.readouterr().out
-    finally:
-        FakeHttp.request = real
-    assert w.queued == ["https://www.deezer.com/album/11"]
-    assert stored_arl(str(w.login_file)) == GOOD
-    assert any("last one that worked was put back" in m for m in sent)
+    def request(self, method, url, *a, **k):
+        if url.endswith("/auth/token"):
+            w.token_calls = getattr(w, "token_calls", 0) + 1
+            raise HttpError("api.deezer.com: HTTP 403")
+        return real(self, method, url, *a, **k)
+    return request
+
+
+def test_a_blocked_email_login_waits_a_day_and_alerts_once(cli, w, monkeypatch, capsys):
+    """2026-10-22 on: Deezer answered the email login with HTTP 403 every hour."""
+    import music_tools.cli as c
+    run, sent = cli
+    run.creds()
+    w.valid = {NEW}  # the stored login no longer works, and nothing was kept
+    monkeypatch.setattr(FakeHttp, "request", blocked_email_login(w))
+    assert run("run") == 1
+    assert "Deezer blocked the email login (api.deezer.com: HTTP 403)" in capsys.readouterr().out
+    assert run("run") == 1 and run("run") == 1
+    out = capsys.readouterr().out
+    assert w.token_calls == 1, "not tried again within the day"
+    assert "not tried again until" in out and "arl renew --force" in out
+    assert len(sent) == 1, sent
+    assert stored_arl(str(w.login_file)) == GOOD, "deemix left as it was"
+
+    assert run("deemix", "arl", "renew", "--force") == 1 and w.token_calls == 2, "--force tries now"
+    monkeypatch.setattr(c, "EMAIL_BACKOFF_HOURS", 0)
+    assert run("run") == 1 and w.token_calls == 3, "and after the day it is tried again"

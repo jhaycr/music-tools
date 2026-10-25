@@ -38,6 +38,7 @@ class Deemix:
         self.http = http or Http(timeout=120)
         self.arl = arl
         self._logged_in = False
+        self.login_failed: DeemixError | None = None
 
     def login(self, arl: str) -> None:
         r = self.http.request("POST", self.url + "/api/loginArl", body={"arl": arl})
@@ -47,8 +48,14 @@ class Deemix:
                               + (f", {r.get('error')}" if isinstance(r, dict) and r.get("error") else "") + ")")
 
     def queue(self, url: str, bitrate: str | None = None) -> None:
+        if self.login_failed:  # tried once this run: every retry would wipe deemix's login again
+            raise self.login_failed
         if self.arl and not self._logged_in:
-            self.login(self.arl)
+            try:
+                self.login(self.arl)
+            except DeemixError as e:
+                self.login_failed = e
+                raise
             self._logged_in = True
         r = self.http.request("POST", self.url + "/api/addToQueue",
                               body={"url": url, "bitrate": bitrate or "null"})
