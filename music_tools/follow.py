@@ -1,9 +1,9 @@
 """Download what the account's favourite artists release.
 
-The first run takes the favourites as they stand and records everything they
-have already released as 'baseline': from then on only new releases download.
-An artist favourited after that first run gets its whole catalogue once, then
-new releases. Albums, EPs and singles; not compilations, and nothing dated in
+An artist is followed from the day it is first seen as a favourite: everything
+it has already released is recorded as 'baseline', and only its new releases
+download. That holds for the first run's favourites and for any favourited
+later. Albums, EPs and singles; not compilations, and nothing dated in
 the future (it is picked up on the day).
 """
 from __future__ import annotations
@@ -45,18 +45,18 @@ def follow(store: Store, account: Account, catalogue: Catalogue, deemix: Deemix 
            today: str | None = None, log=print, err=None) -> dict:
     err = err or log
     today = today or date.today().isoformat()
-    first_run = store.get_meta("initialized") is None
     favs = account.favorite_artists()
     out = {"artists": len(favs), "queued": [], "failed": [], "deferred": 0, "new_artists": []}
     budget = max_queue
     for a in favs:
         row = store.artist(a["id"])
         new = row is None
-        mode = ("baseline" if first_run else "backfill") if new else row["mode"]
+        # Artists followed before 2026-10-26 may be 'backfill' (whole catalogue);
+        # theirs is queued already, so they now behave the same.
+        mode = "baseline" if new else row["mode"]
         if new:
             out["new_artists"].append(a["name"])
-            log(f"{a['name']}: " + ("new releases from today" if mode == "baseline"
-                                            else "whole catalogue, then new releases"))
+            log(f"{a['name']}: new releases from today")
             if not dry_run:
                 store.add_artist(a["id"], a["name"], mode)
         try:
@@ -99,7 +99,7 @@ def follow(store: Store, account: Account, catalogue: Catalogue, deemix: Deemix 
             out["queued"].append(label)
     if not dry_run:
         store.set_active({a["id"] for a in favs})
-        if first_run:
+        if store.get_meta("initialized") is None:
             store.set_meta("initialized", now())
     if out["deferred"]:
         log(f"{out['deferred']} more over the limit of {max_queue} a run; next run")

@@ -103,6 +103,13 @@ def catalogue(w):
     return Catalogue(FakeHttp(w), min_interval=0)
 
 
+def followed(store, w):
+    """The favourites followed already, with nothing released yet: what they release next downloads."""
+    albums, w.albums = w.albums, {}
+    follow(store, account(w), catalogue(w), None, today="2026-10-20", log=lambda *_: None)
+    w.albums = albums
+
+
 # ---- pick
 
 def test_pick_types_future_and_duplicates():
@@ -118,32 +125,33 @@ def test_pick_types_future_and_duplicates():
 
 # ---- follow
 
-def test_first_run_baselines_then_new_release_and_new_artist(w):
+def test_favourites_only_ever_download_what_they_release_next(w):
     store = Store(":memory:")
     out = follow(store, account(w), catalogue(w), Deemix("http://deemix:6595", FakeHttp(w), arl=GOOD), today="2026-10-20",
                  log=lambda *_: None)
     assert out["queued"] == [] and w.queued == [] and store.release_state(10) == "baseline"
-    # a new release from the old favourite, and a new favourite with a catalogue
+    # a new release from the old favourite, and a new favourite with a catalogue: not downloaded
     w.albums[1].append(rel(11, "Second", "ep", "2026-10-19"))
     w.favs.append({"ART_ID": "2", "ART_NAME": "New Band"})
     w.albums[2] = [rel(20, "Debut", "album", "2019-05-05"), rel(21, "Debut", "album", "2019-05-05", True),
-                   rel(22, "Next", "single", "2099-01-01")]
+                   rel(22, "Next", "single", "2026-11-01")]
     out = follow(store, account(w), catalogue(w), Deemix("http://deemix:6595", FakeHttp(w), arl=GOOD), today="2026-10-20",
                  log=lambda *_: None)
-    assert w.queued == ["https://www.deezer.com/album/11", "https://www.deezer.com/album/21"]
-    assert store.artist(2)["mode"] == "backfill" and store.release_state(22) is None
-    follow(store, account(w), catalogue(w), Deemix("http://deemix:6595", FakeHttp(w), arl=GOOD), today="2026-10-20",
+    assert w.queued == ["https://www.deezer.com/album/11"]
+    assert store.artist(2)["mode"] == "baseline" and store.release_state(21) == "baseline"
+    assert store.release_state(22) is None, "not out yet"
+    follow(store, account(w), catalogue(w), Deemix("http://deemix:6595", FakeHttp(w), arl=GOOD), today="2026-11-01",
            log=lambda *_: None)
-    assert len(w.queued) == 2, "nothing twice"
+    assert w.queued == ["https://www.deezer.com/album/11", "https://www.deezer.com/album/22"], "on its day, once"
 
 
 def test_dry_run_changes_nothing_and_limit_defers(w):
     store = Store(":memory:")
-    store.set_meta("initialized", "x")  # not the first run: a new artist backfills
+    followed(store, w)
     w.albums[1] = [rel(i, f"T{i}", "single", "2020-01-01") for i in range(1, 6)]
     out = follow(store, account(w), catalogue(w), None, max_queue=3, dry_run=True, today="2026-10-20",
                  log=lambda *_: None)
-    assert len(out["queued"]) == 3 and out["deferred"] == 2 and store.artist(1) is None and w.queued == []
+    assert len(out["queued"]) == 3 and out["deferred"] == 2 and store.release_state(1) is None and w.queued == []
     out = follow(store, account(w), catalogue(w), Deemix("x", FakeHttp(w), arl=GOOD), max_queue=3, today="2026-10-20",
                  log=lambda *_: None)
     assert len(w.queued) == 3 and out["deferred"] == 2
@@ -154,7 +162,7 @@ def test_dry_run_changes_nothing_and_limit_defers(w):
 
 def test_a_failed_queue_is_retried(w):
     store = Store(":memory:")
-    store.set_meta("initialized", "x")
+    followed(store, w)
 
     class Broken(Deemix):
         def queue(self, url, bitrate=None):
@@ -426,8 +434,7 @@ def test_follow_and_favorite_refuse_cleanly_without_a_login(cli, w, capsys):
 def test_run_logs_deemix_in_before_queueing_and_only_once(cli, w, capsys):
     run, _ = cli
     assert run("run") == 0  # the first run: a baseline
-    w.favs.append({"ART_ID": "2", "ART_NAME": "New Band"})
-    w.albums[2] = [rel(20, "Debut", "album", "2019-05-05"), rel(21, "Next", "single", "2020-01-01")]
+    w.albums[1] += [rel(20, "Second", "album", "2019-05-05"), rel(21, "Next", "single", "2020-01-01")]
     assert run("run") == 0, capsys.readouterr().out
     assert w.queued == ["https://www.deezer.com/album/20", "https://www.deezer.com/album/21"]
     assert w.deemix_logins == 1, "one deemix login per run, only when something is queued"

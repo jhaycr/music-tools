@@ -148,7 +148,7 @@ def cmd_favorite(a, cfg: Config) -> int:
         log.error("deemix", f"favorite: {e}")
         return 1
     log.info("deemix", f"{r['name']} ({r['id']}) " + ("was already a favourite" if r["already"]
-                                                     else "is now a favourite; the next run downloads its catalogue"))
+                                                     else "is now a favourite; its releases from today on download"))
     return 0
 
 

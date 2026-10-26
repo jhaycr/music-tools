@@ -129,11 +129,9 @@ accounts for is listed too.
 
 ## How following works
 
-- **The first run** takes the favourites as they stand and records
-  everything they have already released as a baseline. Nothing downloads:
-  you most likely have those already. From then on, only new releases do.
-- **An artist favourited later** gets its whole catalogue once, then new
-  releases.
+- **An artist is followed from the day it is favourited**, on the first run
+  or any later one: everything it has already released is recorded as a
+  baseline, and nothing of it downloads. From then on, its new releases do.
 - Albums, EPs and singles; not compilations. Deezer often lists the explicit
   and clean versions of a release separately: the explicit one is taken. A
   release dated in the future waits for its day.
