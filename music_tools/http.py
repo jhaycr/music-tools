@@ -1,8 +1,7 @@
 """The one place requests leave. A cookie jar per instance, so each login is
 its own session; tests swap the whole class for a fake.
 
-Nothing here logs a URL, a header or a body: the email login puts a password
-hash in a query string and the ARL in a cookie.
+Nothing here logs a URL, a header or a body: the ARL goes in a cookie.
 """
 from __future__ import annotations
 

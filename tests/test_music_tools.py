@@ -6,7 +6,7 @@ import pytest
 from music_tools import arl as arlmod
 from music_tools.config import Config
 from music_tools.deemix import Deemix, stored_arl
-from music_tools.deezer import CLIENT_ID, CLIENT_SECRET, Account, Catalogue, DeezerError, _md5, arl_from_login
+from music_tools.deezer import Account, Catalogue
 from music_tools.follow import follow, pick
 from music_tools.store import Store
 
@@ -24,8 +24,6 @@ class World:
         self.login_file = tmp_path / "login.json"
         self.login_file.write_text(json.dumps({"arl": GOOD}))
         self.queued, self.calls, self.favorited = [], [], []
-        self.token_ok = True
-        self.issue = NEW
         self.deemix_saves = True
 
 
@@ -37,7 +35,6 @@ class FakeHttp:
     def __init__(self, world, timeout=30):
         self.w = world
         self.cookies = {}
-        self.authed = False
 
     def set_cookie(self, domain, name, value):
         self.cookies[name] = value
@@ -47,8 +44,6 @@ class FakeHttp:
         w.calls.append((url.split("?")[0], p.get("method")))
         if url.endswith("gw-light.php"):
             m = p["method"]
-            if m == "user.getArl":
-                return {"error": {}, "results": w.issue if self.authed else None}
             if self.cookies.get("arl") not in w.valid:
                 return {"error": {}, "results": {"USER": {"USER_ID": 0}, "checkForm": "x"}}
             if m == "deezer.getUserData":
@@ -59,13 +54,6 @@ class FakeHttp:
             if m == "artist.addFavorite":
                 w.favorited.append(body["ART_ID"])
                 return {"error": {}, "results": True}
-        if url.endswith("/auth/token"):
-            assert p["hash"] == _md5(CLIENT_ID + p["login"] + p["password"] + CLIENT_SECRET)
-            ok = w.token_ok and p["password"] == _md5("pw")
-            return {"access_token": "T"} if ok else {"error": {"type": "Exception", "message": "Invalid login"}}
-        if "/platform/generic/" in url:
-            self.authed = headers.get("Authorization") == "Bearer T"
-            return None
         if "/artist/" in url and url.endswith("/albums"):
             aid = int(url.split("/artist/")[1].split("/")[0])
             return {"data": w.albums.get(aid, [])}
@@ -95,13 +83,9 @@ def w(tmp_path):
     return World(tmp_path)
 
 
-def cfg(w, creds=True, tmp=None, keep=False):
+def cfg(w, keep=False):
     d = w.login_file.parent
-    if creds:
-        (d / "email").write_text("me@example.com\n")
-        (d / "password").write_text("pw\n")
     return Config(deemix_url="http://deemix:6595", login_file=str(w.login_file), db=str(d / "db.sqlite"),
-                  email_file=str(d / "email") if creds else "", password_file=str(d / "password") if creds else "",
                   apprise_url="", bitrate=None, max_queue=100, keep_file=str(d / "kept") if keep else "")
 
 
@@ -193,53 +177,19 @@ def test_a_later_listing_of_the_same_title_is_skipped(w):
 # ---- arl
 
 def test_valid_login_is_left_alone(w):
-    acct, renewed = arlmod.ensure(cfg(w), http=factory(w), log=lambda *_: None)
-    assert not renewed and acct.user["USER_ID"] == 42
-    assert not any(c[0].endswith("/auth/token") for c in w.calls)
-
-
-def test_expired_login_is_renewed_and_saved(w):
-    w.valid = {NEW}  # Deezer stopped accepting GOOD
-    acct, renewed = arlmod.ensure(cfg(w), http=factory(w), log=lambda *_: None)
-    assert renewed and stored_arl(str(w.login_file)) == NEW
-
-
-def test_no_credentials_means_no_renewal(w):
-    w.valid = {NEW}
-    with pytest.raises(arlmod.RenewError, match="no email and password"):
-        arlmod.ensure(cfg(w, creds=False), http=factory(w), log=lambda *_: None)
-    assert stored_arl(str(w.login_file)) == GOOD
-
-
-def test_a_bad_new_arl_never_reaches_deemix(w):
-    w.valid = set()  # nothing logs in, not even what Deezer just issued
-    with pytest.raises(arlmod.RenewError, match="doesn't log in"):
-        arlmod.ensure(cfg(w), http=factory(w), log=lambda *_: None)
+    acct, done = arlmod.ensure(cfg(w), http=factory(w), log=lambda *_: None)
+    assert done == "" and acct.user["USER_ID"] == 42
     assert not any(c[0].endswith("/api/loginArl") for c in w.calls)
-    assert stored_arl(str(w.login_file)) == GOOD, "deemix's stored login untouched"
 
 
-def test_refused_email_login_says_why_without_the_password(w):
-    w.valid, w.token_ok = {NEW}, False
-    with pytest.raises(arlmod.RenewError) as e:
-        arlmod.ensure(cfg(w), http=factory(w), log=lambda *_: None)
-    assert "Invalid login" in str(e.value) and "pw" not in str(e.value).replace("password", "")
-
-
-def test_unreachable_deezer_is_not_a_reason_to_renew(w):
+def test_unreachable_deezer_is_not_a_reason_to_touch_deemix(w):
     from music_tools.http import HttpError
 
     class Down(FakeHttp):
         def request(self, *a, **k):
             raise HttpError("www.deezer.com: URLError")
-    with pytest.raises(arlmod.RenewError, match="can't be reached"):
-        arlmod.ensure(cfg(w), http=lambda timeout=30: Down(w), log=lambda *_: None)
-
-
-def test_deemix_must_actually_save_it(w):
-    w.valid, w.deemix_saves = {NEW}, False
-    with pytest.raises(arlmod.RenewError, match="didn't save"):
-        arlmod.ensure(cfg(w), http=factory(w), log=lambda *_: None)
+    with pytest.raises(arlmod.LoginError, match="can't be reached"):
+        arlmod.ensure(cfg(w, keep=True), http=lambda timeout=30: Down(w), log=lambda *_: None)
 
 
 def test_a_working_login_is_kept_owner_only(w):
@@ -256,36 +206,33 @@ def test_a_wiped_login_is_restored_from_the_kept_one(w):
     acct, done = arlmod.ensure(c, http=factory(w), log=lambda *_: None)
     assert done == "restored" and acct.user["USER_ID"] == 42
     assert stored_arl(str(w.login_file)) == GOOD
-    assert not any(c[0].endswith("/auth/token") for c in w.calls), "no email login needed"
 
 
-def test_a_kept_login_that_no_longer_works_falls_back_to_renewal(w):
+def test_deemix_must_actually_save_the_restored_login(w):
     c = cfg(w, keep=True)
     arlmod.ensure(c, http=factory(w), log=lambda *_: None)
-    w.valid = {NEW}
-    acct, done = arlmod.ensure(c, http=factory(w), log=lambda *_: None)
-    assert done == "renewed" and stored_arl(str(w.login_file)) == NEW == arlmod.kept_arl(c)
+    w.login_file.write_text(json.dumps({"arl": None}))
+    w.deemix_saves = False
+    with pytest.raises(arlmod.LoginError, match="didn't save"):
+        arlmod.ensure(c, http=factory(w), log=lambda *_: None)
 
 
-def test_a_refused_email_login_says_how_to_fix_it(w):
-    from music_tools.http import HttpError
-
-    class Blocked(FakeHttp):
-        def request(self, method, url, *a, **k):
-            if url.endswith("/auth/token"):
-                raise HttpError("api.deezer.com: HTTP 403")
-            return super().request(method, url, *a, **k)
-    w.valid = {NEW}
-    with pytest.raises(arlmod.RenewError, match=r"blocked the email login \(api.deezer.com: HTTP 403\).*"
-                                                 r"log deemix in with a fresh ARL") as e:
-        arlmod.ensure(cfg(w), http=lambda timeout=30: Blocked(w), log=lambda *_: None)
-    assert e.value.blocked
+def test_an_expired_login_with_nothing_kept_says_how_to_fix_it(w):
+    w.valid = {NEW}  # Deezer stopped accepting GOOD
+    with pytest.raises(arlmod.LoginError, match=r"login is invalid; log deemix in with a fresh ARL"):
+        arlmod.ensure(cfg(w, keep=True), http=factory(w), log=lambda *_: None)
+    assert not any(c[0].endswith("/api/loginArl") for c in w.calls)
+    assert stored_arl(str(w.login_file)) == GOOD, "deemix's stored login untouched"
 
 
-def test_arl_from_login_rejects_garbage(w):
-    w.issue = "not-an-arl"
-    with pytest.raises(DeezerError, match="no ARL"):
-        arl_from_login("me@example.com", "pw", http=FakeHttp(w))
+def test_a_kept_login_that_no_longer_works_is_not_handed_to_deemix(w):
+    c = cfg(w, keep=True)
+    arlmod.ensure(c, http=factory(w), log=lambda *_: None)
+    w.login_file.write_text(json.dumps({"arl": None}))
+    w.valid = set()
+    with pytest.raises(arlmod.LoginError, match="the last one that worked no longer logs in either; log deemix in"):
+        arlmod.ensure(c, http=factory(w), log=lambda *_: None)
+    assert not any(c[0].endswith("/api/loginArl") for c in w.calls)
 
 
 # ---- artists: ids, never names
@@ -399,19 +346,10 @@ def cli(w, monkeypatch):
     monkeypatch.setenv("APPRISE_URL", "http://apprise/notify/x")
     monkeypatch.setenv("MT_LIBRARY", str(d / "no-library"))
     monkeypatch.setenv("MT_ARL_KEEP", str(d / "kept"))
-    for k in ("DEEZER_EMAIL_FILE", "DEEZER_PASSWORD_FILE"):
-        monkeypatch.delenv(k, raising=False)
-
-    def creds(email="me@example.com", password="pw"):
-        (d / "email").write_text(email)
-        (d / "password").write_text(password)
-        monkeypatch.setenv("DEEZER_EMAIL_FILE", str(d / "email"))
-        monkeypatch.setenv("DEEZER_PASSWORD_FILE", str(d / "password"))
 
     def run(*argv):
         from music_tools.cli import main
         return main(list(argv))
-    run.creds = creds
     return run, sent
 
 
@@ -419,42 +357,33 @@ def errors(out):
     return [l for l in out.splitlines() if " ERROR " in l]
 
 
-def test_expired_login_and_no_credentials_is_an_error_alerted_once(cli, w, capsys):
+def test_an_expired_login_is_an_error_alerted_once(cli, w, capsys):
     run, sent = cli
-    w.valid = {NEW}  # Deezer no longer takes the stored ARL
+    w.valid = {NEW}  # Deezer no longer takes the stored ARL, nor the kept one (the same)
     assert run("run") == 1
     errs = errors(capsys.readouterr().out)
-    assert any("deemix: login: deemix's Deezer login is invalid" in e and "DEEZER_EMAIL_FILE is not set" in e
+    assert any("deemix: login: deemix's Deezer login is invalid" in e and "fresh ARL from a browser" in e
                for e in errs), errs
     assert any("run: failed: deemix" in e for e in errs)
     assert len(sent) == 1 and run("run") == 1 and len(sent) == 1, "alerted once while it lasts"
     assert stored_arl(str(w.login_file)) == GOOD
 
 
-def test_an_empty_password_file_is_named(cli, w, capsys):
-    run, _ = cli
-    w.valid = {NEW}
-    run.creds(password="")
-    assert run("deemix", "run") == 1
-    assert "password (DEEZER_PASSWORD_FILE) is empty or unreadable" in capsys.readouterr().out
-
-
-def test_wrong_password_says_what_deezer_said(cli, w, capsys):
-    run, _ = cli
-    w.valid = {NEW}
-    run.creds(password="wrong")
-    assert run("run") == 1
-    out = capsys.readouterr().out
-    assert "ERROR deemix: login: Deezer refused the email login: Invalid login" in out and "wrong" not in out
-    assert stored_arl(str(w.login_file)) == GOOD
-
-
-def test_a_working_login_without_credentials_still_follows_with_a_warning(cli, w, capsys):
+def test_a_working_login_follows_without_warnings(cli, w, capsys):
     run, _ = cli
     assert run("run") == 0
     out = capsys.readouterr().out
-    assert "WARN  deemix: login works, but can't be renewed when it expires: DEEZER_EMAIL_FILE is not set" in out
-    assert "INFO  deemix: 1 favourite artists" in out and not errors(out)
+    assert "INFO  deemix: 1 favourite artists" in out and " WARN " not in out and not errors(out)
+
+
+def test_arl_restore_puts_back_a_wiped_login(cli, w, capsys):
+    run, sent = cli
+    assert run("deemix", "arl", "check") == 0  # check never keeps or touches anything
+    assert run("deemix", "arl", "restore") == 0  # works: kept
+    w.login_file.write_text(json.dumps({"arl": None}))
+    assert run("deemix", "arl", "check") == 2
+    assert run("deemix", "arl", "restore") == 0 and stored_arl(str(w.login_file)) == GOOD
+    assert any("last one that worked was put back" in m for m in sent)
 
 
 def test_one_tool_crashing_does_not_stop_the_others(cli, monkeypatch, capsys):
@@ -535,36 +464,3 @@ def test_a_deemix_login_that_fails_is_put_back_in_the_same_run(cli, w, monkeypat
     assert any("last one that worked was put back" in m for m in sent)
     assert run("run") == 0, capsys.readouterr().out
     assert w.queued == ["https://www.deezer.com/album/11", "https://www.deezer.com/album/12"]
-
-
-def blocked_email_login(w):
-    from music_tools.http import HttpError
-    real = FakeHttp.request
-
-    def request(self, method, url, *a, **k):
-        if url.endswith("/auth/token"):
-            w.token_calls = getattr(w, "token_calls", 0) + 1
-            raise HttpError("api.deezer.com: HTTP 403")
-        return real(self, method, url, *a, **k)
-    return request
-
-
-def test_a_blocked_email_login_waits_a_day_and_alerts_once(cli, w, monkeypatch, capsys):
-    """2026-10-22 on: Deezer answered the email login with HTTP 403 every hour."""
-    import music_tools.cli as c
-    run, sent = cli
-    run.creds()
-    w.valid = {NEW}  # the stored login no longer works, and nothing was kept
-    monkeypatch.setattr(FakeHttp, "request", blocked_email_login(w))
-    assert run("run") == 1
-    assert "Deezer blocked the email login (api.deezer.com: HTTP 403)" in capsys.readouterr().out
-    assert run("run") == 1 and run("run") == 1
-    out = capsys.readouterr().out
-    assert w.token_calls == 1, "not tried again within the day"
-    assert "not tried again until" in out and "arl renew --force" in out
-    assert len(sent) == 1, sent
-    assert stored_arl(str(w.login_file)) == GOOD, "deemix left as it was"
-
-    assert run("deemix", "arl", "renew", "--force") == 1 and w.token_calls == 2, "--force tries now"
-    monkeypatch.setattr(c, "EMAIL_BACKOFF_HOURS", 0)
-    assert run("run") == 1 and w.token_calls == 3, "and after the day it is tried again"

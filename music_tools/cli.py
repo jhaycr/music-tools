@@ -1,10 +1,10 @@
 """music-tools: small one-shot tools for a self-hosted music library, cron-friendly.
 
   run                          every scheduled tool, each on its own (now: deemix run)
-  deemix run                   deemix arl renew if needed, then deemix follow
+  deemix run                   deemix arl restore if needed, then deemix follow
   deemix follow [--dry-run]    queue new releases of the Deezer account's favourite artists
   deemix arl check             does deemix's stored Deezer login still work?
-  deemix arl renew [--force]   make a new ARL from the email and password, hand it to deemix
+  deemix arl restore           give deemix back the last login that worked, if it lost it
   deemix favorite add ID       favourite an artist: a Deezer artist id or URL, or a
                                MusicBrainz artist id (never a name)
   deemix status                artists followed and the latest releases queued
@@ -15,9 +15,8 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timedelta, timezone
 
-from .arl import FIX, RenewError, check, ensure
+from .arl import FIX, LoginError, check, ensure
 from .artists import ArtistError, MusicBrainz, resolve, search
 from .config import Config
 from .deemix import Deemix, DeemixError, stored_arl
@@ -26,11 +25,7 @@ from .follow import add_favorite, follow
 from .http import Http, HttpError
 from .notify import notify
 from . import log
-from .store import Store, now
-
-# After Deezer blocks the email login (HTTP 403), wait this long before trying it again.
-EMAIL_BACKOFF_HOURS = 24
-
+from .store import Store
 
 def _alert(cfg: Config, store: Store, title: str, body: str) -> None:
     """Notify about a problem once, not on every cron pass while it lasts."""
@@ -44,37 +39,16 @@ def _clear_alert(store: Store) -> None:
         store.set_meta("last_alert", "")
 
 
-def _email_blocked(store: Store) -> str | None:
-    """Why the email login is not to be tried yet, or None."""
-    at = store.get_meta("email_blocked_at")
-    if not at:
-        return None
-    until = datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) + timedelta(hours=EMAIL_BACKOFF_HOURS)
-    if datetime.now(timezone.utc) >= until:
-        return None
-    return (f"Deezer blocked the email login at {at}, so it is not tried again until "
-            f"{until.strftime('%Y-%m-%dT%H:%M:%SZ')} (`music-tools deemix arl renew --force` tries now)")
-
-
-def _login(cfg: Config, store: Store, force: bool = False):
-    """deemix's Deezer account, renewing the login if it must. None (logged as an ERROR) when it can't."""
+def _login(cfg: Config, store: Store):
+    """deemix's Deezer account, restoring its login if it must. None (logged as an ERROR) when it can't."""
     try:
-        account, done = ensure(cfg, force=force, log=lambda m: log.info("deemix", m),
-                               email_blocked=_email_blocked(store))
-    except RenewError as e:
-        if e.blocked and not _email_blocked(store):
-            store.set_meta("email_blocked_at", now())
+        account, done = ensure(cfg, log=lambda m: log.info("deemix", m))
+    except LoginError as e:
         log.error("deemix", f"login: {e}")
-        # One alert for a blocked email login, however its wording changes while it lasts.
-        _alert(cfg, store, "music-tools: deemix's Deezer login is broken",
-               f"Deezer blocks the email login, so the expired login can't be renewed; {FIX}" if e.blocked else str(e))
+        _alert(cfg, store, "music-tools: deemix's Deezer login is broken", str(e))
         return None
-    if done == "renewed":
-        notify(cfg.apprise_url, "music-tools", "deemix's Deezer login was renewed from the account's email")
-    elif done == "restored":
+    if done == "restored":
         notify(cfg.apprise_url, "music-tools", "deemix had lost its Deezer login; the last one that worked was put back")
-    elif cfg.credentials_problem():
-        log.warn("deemix", f"login works, but can't be renewed when it expires: {cfg.credentials_problem()}")
     return account
 
 
@@ -83,15 +57,10 @@ def cmd_arl(a, cfg: Config) -> int:
         state, account = check(cfg)
         who = f" as {account.user.get('BLOG_NAME') or account.user['USER_ID']}" if account else ""
         (log.info if state == "valid" else log.error)("deemix", f"deemix's Deezer login is {state}{who}")
-        problem = cfg.credentials_problem()
-        if problem:
-            log.warn("deemix", f"renewal not possible: {problem}")
         return 0 if state == "valid" else 2
-    store = Store(cfg.db)
-    if _login(cfg, store, force=a.force) is None:
+    if _login(cfg, Store(cfg.db)) is None:
         return 1
-    if not a.force:
-        log.info("deemix", "deemix's login works; nothing to renew (--force renews anyway)")
+    log.info("deemix", "deemix's login works")
     return 0
 
 
@@ -121,7 +90,8 @@ def cmd_follow(a, cfg: Config) -> int:
     store = Store(cfg.db)
     state, account = check(cfg)
     if state != "valid":
-        log.error("deemix", f"deemix's Deezer login is {state}; `music-tools deemix arl renew` fixes that")
+        log.error("deemix", f"deemix's Deezer login is {state}; `music-tools deemix arl restore` puts back "
+                            f"the last one that worked, or {FIX}")
         return 1
     return _follow(cfg, store, account, a.dry_run)
 
@@ -168,8 +138,8 @@ def cmd_run(a, cfg: Config) -> int:
 def cmd_favorite(a, cfg: Config) -> int:
     state, account = check(cfg)
     if state != "valid":
-        log.error("deemix", f"can't favourite: deemix's Deezer login is {state}; "
-                            "`music-tools deemix arl renew` fixes that")
+        log.error("deemix", f"can't favourite: deemix's Deezer login is {state}; `music-tools deemix arl restore` "
+                            f"puts back the last one that worked, or {FIX}")
         return 1
     try:
         cat = Catalogue()
@@ -240,12 +210,11 @@ def main(argv=None) -> int:
     tools.add_parser("run", help="every scheduled tool, each on its own: what cron runs")
     dz = tools.add_parser("deemix", help="follow favourite artists; keep deemix logged in")
     sub = dz.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("run", help="arl renew if needed, then follow")
+    sub.add_parser("run", help="arl restore if needed, then follow")
     s = sub.add_parser("follow", help="queue new releases of favourite artists")
     s.add_argument("--dry-run", action="store_true", help="say what would be queued; change nothing")
-    s = sub.add_parser("arl", help="check or renew deemix's Deezer login")
-    s.add_argument("action", choices=["check", "renew"])
-    s.add_argument("--force", action="store_true", help="renew even though the login works")
+    s = sub.add_parser("arl", help="check or restore deemix's Deezer login")
+    s.add_argument("action", choices=["check", "restore"])
     s = sub.add_parser("favorite", help="favourite an artist on the account")
     s.add_argument("action", choices=["add"])
     s.add_argument("artist", help="Deezer artist id or URL, or MusicBrainz artist id")

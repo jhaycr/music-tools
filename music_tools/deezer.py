@@ -1,12 +1,11 @@
 """Deezer: the account (gateway API, logged in by ARL), the public catalogue
-(no login), and the email login that mints a fresh ARL.
+(no login).
 
 The ARL is a credential. It goes into a cookie and nowhere else: not into an
 exception, a log line or a return value that gets printed.
 """
 from __future__ import annotations
 
-import hashlib
 import re
 import time
 
@@ -14,19 +13,11 @@ from .http import Http
 
 GW = "https://www.deezer.com/ajax/gw-light.php"
 API = "https://api.deezer.com"
-# The app deemix itself uses for its email login (deemix,
-# packages/deemix/src/utils/deezer.ts): Deezer's own published client.
-CLIENT_ID = "172365"
-CLIENT_SECRET = "fb0bec7ccc063dab0417eb7b0d847f34"
 ARL = re.compile(r"[0-9a-f]{64,}", re.I)
 
 
 class DeezerError(Exception):
     pass
-
-
-def _md5(s: str) -> str:
-    return hashlib.md5(s.encode("utf-8")).hexdigest()
 
 
 class Account:
@@ -62,27 +53,6 @@ class Account:
 
     def add_favorite_artist(self, artist_id: int) -> None:
         self.gw("artist.addFavorite", {"ART_ID": artist_id})
-
-
-def arl_from_login(email: str, password: str, http: Http | None = None) -> str:
-    """Email and password to a new ARL, the way deemix's own email login does it."""
-    http = http or Http()
-    pw = _md5(password)
-    r = http.request("GET", API + "/auth/token", {
-        "app_id": CLIENT_ID, "login": email, "password": pw,
-        "hash": _md5(CLIENT_ID + email + pw + CLIENT_SECRET)})
-    token = (r or {}).get("access_token") if isinstance(r, dict) else None
-    if not token:
-        err = (r or {}).get("error") if isinstance(r, dict) else None
-        why = err.get("message") or err.get("type") if isinstance(err, dict) else "no access token"
-        raise DeezerError(f"Deezer refused the email login: {why}")
-    # Any authorised call sets the session cookie that user.getArl reads.
-    http.request("GET", API + "/platform/generic/track/3135556", headers={"Authorization": "Bearer " + token})
-    r = http.request("GET", GW, {"method": "user.getArl", "input": "3", "api_version": "1.0", "api_token": "null"})
-    arl = r.get("results") if isinstance(r, dict) else None
-    if not isinstance(arl, str) or not ARL.fullmatch(arl):
-        raise DeezerError("Deezer accepted the login but gave no ARL")
-    return arl
 
 
 class Catalogue:

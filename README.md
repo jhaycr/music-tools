@@ -11,8 +11,9 @@ library only.
   deemix is already logged in to.
 - **`deemix`: keep deemix logged in.** deemix stores one Deezer login cookie
   (the ARL). When Deezer stops accepting it, every download fails until
-  someone pastes a new one. music-tools notices, logs in with the account's
-  email and password, and hands deemix the new ARL.
+  someone pastes a new one. music-tools keeps the last ARL that worked and
+  gives it back when deemix loses it, and tells you when only a fresh one
+  will do.
 - **`artist`: tell artists apart.** Many artists share a name. Artists are
   always named by id, and `artist search` shows the evidence to pick the right
   one.
@@ -43,12 +44,8 @@ services:
       - ./music-tools:/config                    # its state (SQLite) and the kept login
       - ./deemix/config:/deemix:ro               # deemix's config folder, for login.json
       - ./music:/music:ro                        # optional: the library, for artist search
-      - ./secrets/deezer-email:/run/secrets/deezer-email:ro
-      - ./secrets/deezer-password:/run/secrets/deezer-password:ro
     environment:
       DEEMIX_URL: http://deemix:6595
-      DEEZER_EMAIL_FILE: /run/secrets/deezer-email
-      DEEZER_PASSWORD_FILE: /run/secrets/deezer-password
       # APPRISE_URL: http://apprise:8000/notify/<key>   # optional
 ```
 
@@ -59,17 +56,14 @@ The default command is `run`: every scheduled tool, each on its own (today,
 17 * * * * docker start -a music-tools
 ```
 
-The email and password are optional: without them, everything works except
-renewing an expired login (you are told it has expired instead).
-
 ## Commands
 
 ```
 music-tools run                           every scheduled tool, each on its own (the default)
-music-tools deemix run                    deemix arl renew if needed, then deemix follow
+music-tools deemix run                    deemix arl restore if needed, then deemix follow
 music-tools deemix follow [--dry-run]     queue new releases of the favourite artists
 music-tools deemix arl check              does deemix's stored login still work?
-music-tools deemix arl renew [--force]    new ARL from the email and password, given to deemix
+music-tools deemix arl restore            give deemix back the last login that worked, if it lost it
 music-tools deemix favorite add ID        favourite an artist: Deezer artist id or URL, or a
                                           MusicBrainz artist id. Never a name
 music-tools deemix status                 artists followed, latest releases queued
@@ -88,12 +82,10 @@ outright (logged with its traceback), never stops the others, and `run` exits
 
 | Situation | What happens |
 |---|---|
-| deemix's login works, email/password not configured | `WARN` each run naming the missing setting; following carries on |
-| login expired or missing, no email/password | `ERROR` naming what is missing (the variable, or the empty file); nothing is queued; deemix's stored login is left alone |
-| login expired, wrong password | `ERROR` with Deezer's own reason; deemix left alone |
-| login expired, Deezer blocks the email login (HTTP 403) | `ERROR` saying so and how to fix it by hand; not tried again for a day; one alert while it lasts |
+| deemix's login gone, the kept one still works | deemix is given the kept one back; one notification |
+| login expired, and the kept one too | `ERROR` saying to paste a fresh ARL; nothing is queued; deemix's stored login is left alone; one alert while it lasts |
 | deemix's session won't log in while queueing | `ERROR`; deemix's login, which that wiped, is put back in the same run; the releases queue next run |
-| Deezer can't be reached | `ERROR`; no renewal attempted (an outage is not an expired login) |
+| Deezer can't be reached | `ERROR`; deemix's login is left alone (an outage is not an expired login) |
 | a release deemix won't queue | `ERROR` for that release; the rest queue; it is tried again next run |
 | `artist search` without a working login | `WARN`; the search runs, favourites just aren't marked |
 
@@ -152,35 +144,29 @@ accounts for is listed too.
 Downloads land wherever deemix's settings say, as if you had queued them in
 the web UI.
 
-## How the login renewal works
+## How the login is kept
 
 1. Each run checks deemix's stored ARL (`login.json`) against Deezer. One
    that logs in is kept in `MT_ARL_KEEP` (owner-only).
 2. If Deezer can't be reached, nothing happens: that is not an expired login.
 3. If deemix's login is gone or no longer logs in, but the kept ARL still
-   does, deemix is given the kept one back. Any failed `/api/loginArl`, even
-   a passing network error inside deemix, makes deemix forget its stored
-   login while the ARL itself is still good; this undoes that. When it
-   happens while queueing, deemix is given the kept ARL back in the same run
-   (and its session is not retried once per release, which would wipe it
-   again each time); the releases are queued next run.
-4. Otherwise music-tools logs in with the email and password the way deemix's
-   own email login does, and gets a new ARL.
-5. It checks the new ARL logs in, and only then gives it to deemix
-   (`/api/loginArl`). In single-user mode deemix saves it. Giving deemix an ARL
-   that fails would make deemix forget its stored login, which is why step 5
-   checks first.
-6. It confirms deemix saved it.
+   does, deemix is given the kept one back (`/api/loginArl`; in single-user
+   mode deemix saves it), and music-tools confirms it was saved. Any failed
+   `/api/loginArl`, even a passing network error inside deemix, makes deemix
+   forget its stored login while the ARL itself is still good; this undoes
+   that. When it happens while queueing, deemix is given the kept ARL back in
+   the same run (and its session is not retried once per release, which would
+   wipe it again each time); the releases are queued next run.
+4. Otherwise the login has really expired: log deemix in with a fresh ARL
+   from a browser (the `arl` cookie on deezer.com), and the next run keeps
+   that one. An ARL that doesn't log in is never handed to deemix, because a
+   failed `/api/loginArl` would make deemix forget its stored login.
 
-An account with two-factor sign-in, or one Deezer asks to solve a captcha,
-can't log in this way, and Deezer sometimes refuses it outright (HTTP 403).
-Renewal then fails and says why: log deemix in with a fresh ARL from a
-browser (the `arl` cookie on deezer.com), and the next run keeps that one.
-After a 403 the email login isn't tried again for a day (retrying every hour
-won't change Deezer's mind); `music-tools deemix arl renew --force` tries now.
+There is no email-and-password renewal: Deezer refuses the email login
+deemix's own login page uses (HTTP 403 for its app, for every account, since
+October 2026).
 
-The ARL, the password and the access token are never logged or printed. The
-email and password are read from files, so `docker inspect` doesn't show them.
+The ARL is never logged or printed.
 
 ## Settings
 
@@ -190,13 +176,12 @@ email and password are read from files, so `docker inspect` doesn't show them.
 | `DEEMIX_LOGIN` | `/deemix/login.json` | deemix's stored login |
 | `MT_DB` | `/config/music-tools.db` | state |
 | `MT_ARL_KEEP` | `/config/last-good-arl` | the last ARL that logged in, to restore a wiped login |
-| `DEEZER_EMAIL_FILE`, `DEEZER_PASSWORD_FILE` | unset | the account, for renewal |
 | `MT_BITRATE` | deemix's own | e.g. `9` FLAC, `3` MP3 320 |
 | `MT_MAX_QUEUE` | `100` | releases queued per run |
 | `MT_LIBRARY` | `/music` | the library, read-only, for `artist search` |
 | `APPRISE_URL` | unset | an apprise-api `/notify/<key>` URL |
 
-Notifications: releases queued, a login renewed, and problems (each problem
+Notifications: releases queued, a login restored, and problems (each problem
 once, not on every run while it lasts).
 
 ## Development
