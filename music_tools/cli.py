@@ -10,10 +10,16 @@
   deemix status                artists followed and the latest releases queued
   artist search NAME           Deezer artists of that name, told apart: latest releases,
                                MusicBrainz match and bio, the library folder that is theirs
+  links list                   every link between library categories, broken ones too
+  links add PATH CATEGORY      put an artist, album or song (Category/Artist[/Album[/song]])
+                               into another category as a relative symlink
+  links remove LINK            remove a link (only a link)
+  serve [--port N]             the web UI for all of the above except the scheduled tools
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .arl import FIX, LoginError, check, ensure
@@ -23,6 +29,7 @@ from .deemix import Deemix, DeemixError, stored_arl
 from .deezer import Catalogue, DeezerError
 from .follow import add_favorite, follow
 from .http import Http, HttpError
+from .links import Library, LinkError
 from .notify import notify
 from . import log
 from .store import Store
@@ -203,6 +210,26 @@ def cmd_status(a, cfg: Config) -> int:
     return 0
 
 
+def cmd_links(a, cfg: Config) -> int:
+    lib = Library(cfg.library, cfg.links_exclude)
+    if a.cmd == "add":
+        l = lib.add(a.path, a.category)
+        log.info("links", f"{l.path} -> {l.target}")
+    elif a.cmd == "remove":
+        log.info("links", f"removed {a.link} (it pointed at {lib.remove(a.link) or 'something outside the library'})")
+    else:
+        for l in lib.links():
+            print(f"{l.path}  ->  {l.target or '(outside the library)'}  [{l.kind}{', BROKEN' if l.broken else ''}]")
+    return 0
+
+
+def cmd_serve(a, cfg: Config) -> int:
+    from .web import serve
+    Library(cfg.library, cfg.links_exclude).categories()  # a wrong mount fails here, not on the first page
+    serve(cfg, a.host, a.port)
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="music-tools", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -223,14 +250,26 @@ def main(argv=None) -> int:
     sub = ar.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("search", help="Deezer artists of that name, told apart")
     s.add_argument("name")
+    lk = tools.add_parser("links", help="artists, albums and songs in a second category, as links")
+    sub = lk.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("list", help="every link, broken ones too")
+    s = sub.add_parser("add", help="link Category/Artist[/Album[/song]] into another category")
+    s.add_argument("path")
+    s.add_argument("category")
+    s = sub.add_parser("remove", help="remove a link")
+    s.add_argument("link")
+    s = tools.add_parser("serve", help="the web UI (not the scheduled tools)")
+    s.add_argument("--host", default=os.environ.get("MT_WEB_HOST", "0.0.0.0"))
+    s.add_argument("--port", type=int, default=int(os.environ.get("MT_WEB_PORT", "8000")))
     a = p.parse_args(argv)
     cfg = Config.from_env()
     handlers = {("run", None): cmd_run, ("deemix", "run"): cmd_deemix_run, ("deemix", "follow"): cmd_follow, ("deemix", "arl"): cmd_arl,
                 ("deemix", "favorite"): cmd_favorite, ("deemix", "status"): cmd_status,
-                ("artist", "search"): cmd_artist}
+                ("artist", "search"): cmd_artist, ("links", "list"): cmd_links, ("links", "add"): cmd_links,
+                ("links", "remove"): cmd_links, ("serve", None): cmd_serve}
     try:
         return handlers[(a.tool, getattr(a, "cmd", None))](a, cfg)
-    except (DeemixError, DeezerError, HttpError, ArtistError) as e:
+    except (DeemixError, DeezerError, HttpError, ArtistError, LinkError) as e:
         log.error(a.tool, str(e))
         return 1
     except Exception:

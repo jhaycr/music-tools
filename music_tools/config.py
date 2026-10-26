@@ -15,6 +15,7 @@ class Config:
     max_queue: int
     library: str = ""
     keep_file: str = ""
+    links_exclude: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -28,5 +29,6 @@ class Config:
             max_queue=int(e("MT_MAX_QUEUE", "100")),
             library=e("MT_LIBRARY", "/music"),
             keep_file=e("MT_ARL_KEEP", "/config/last-good-arl"),
+            links_exclude=frozenset(x.strip() for x in e("MT_LINKS_EXCLUDE", "").split(",") if x.strip()),
         )
 

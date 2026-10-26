@@ -1,8 +1,8 @@
 # music-tools
 
-Small one-shot tools for a self-hosted music library, each meant for cron:
-it does its job, logs what it did, and exits. No UI, no daemon, standard
-library only.
+Small tools for a self-hosted music library. The scheduled ones are one-shots
+for cron: each does its job, logs what it did, and exits. The ones you use by
+hand have a small web UI as well as commands. Standard library only.
 
 - **`deemix`: follow favourite artists.** Every album, EP and single that an
   artist favourited on Deezer releases is queued in a
@@ -17,6 +17,12 @@ library only.
 - **`artist`: tell artists apart.** Many artists share a name. Artists are
   always named by id, and `artist search` shows the evidence to pick the right
   one.
+- **`links`: one album in two categories.** Put an artist, an album or a song
+  of one library category into another as a link, not a copy: Frozen lives in
+  Soundtracks and shows up in Kids too. Every link is listed, hand-made and
+  broken ones included, with a Remove button.
+- **`serve`: the web UI.** Links, artist search and favouriting, what is
+  followed and queued, and deemix's login, in a browser (phone too).
 
 Filing downloads into a library is
 [music-sort](https://github.com/jhaycr/music-sort)'s job (to fold in here
@@ -56,6 +62,28 @@ The default command is `run`: every scheduled tool, each on its own (today,
 17 * * * * docker start -a music-tools
 ```
 
+The web UI is the same image running `serve`, as a second service. It has no
+sign-in of its own: publish it on loopback or a private network and put one in
+front (Authentik, a VPN). It writes links into the library, so its library
+mount is read-write.
+
+```yaml
+  music-tools-web:
+    image: ghcr.io/jhaycr/music-tools:latest
+    command: serve
+    user: 1000:1000
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./music-tools:/config
+      - ./deemix/config:/deemix:ro
+      - ./music:/music                           # read-write: links are written here
+    environment:
+      DEEMIX_URL: http://deemix:6595
+      MT_LINKS_EXCLUDE: Family                   # optional: categories another tool owns
+```
+
 ## Commands
 
 ```
@@ -68,6 +96,10 @@ music-tools deemix favorite add ID        favourite an artist: Deezer artist id 
                                           MusicBrainz artist id. Never a name
 music-tools deemix status                 artists followed, latest releases queued
 music-tools artist search NAME            Deezer artists of that name, told apart (below)
+music-tools links list                    every link between categories, broken ones too
+music-tools links add PATH CATEGORY       link Category/Artist[/Album[/song]] into another category
+music-tools links remove LINK             remove a link (only a link)
+music-tools serve [--host H] [--port N]   the web UI for all but the scheduled tools
 ```
 
 `docker exec` does not work on a stopped one-shot container; use
@@ -166,6 +198,40 @@ October 2026).
 
 The ARL is never logged or printed.
 
+## Links between categories
+
+- **A link sits at the same place in the other category.**
+  `Soundtracks/Various Artists/Frozen (2013)` linked into Kids is
+  `Kids/Various Artists/Frozen (2013)`. An artist link covers every album the
+  artist gets later; a song link makes plain artist and album folders above
+  it and links just the file.
+- **Links are relative** (`../../Soundtracks/...`), so they resolve the same
+  on the host and in any container that mounts the library elsewhere.
+- **Only symlinks are written**, and the plain folders a song link needs.
+  Nothing already there is replaced: a real folder in the way, an existing
+  link, or a place already covered by a link above it. Linking a link links
+  what that one points at.
+- **Remove deletes only the link**, then any folder above it left empty, never
+  the category and never what the link pointed at.
+- [music-sort](https://github.com/jhaycr/music-sort) counts a folder of links
+  as no home of the artist, so a link never makes it ask about an artist twice.
+
+## The web UI
+
+`serve` has four pages: **Links** (browse or search the library, add to a
+category, every link with Remove), **Artists** (`artist search` side by side,
+with a Favourite button), **Following** (`deemix status`) and **Deezer login**
+(check it; put the last working login back). The scheduled tools stay with
+cron. Forms post and redirect back, so it works without JavaScript; a POST
+whose `Origin` names another site is refused. Links also have a JSON API:
+
+```
+GET    /api/links                       every link: path, target, kind, broken
+POST   /api/links  {"path", "category"} make a link (201), or {"error"} (400)
+DELETE /api/links?link=<path>           remove a link
+GET    /healthz
+```
+
 ## Settings
 
 | Variable | Default | |
@@ -176,7 +242,9 @@ The ARL is never logged or printed.
 | `MT_ARL_KEEP` | `/config/last-good-arl` | the last ARL that logged in, to restore a wiped login |
 | `MT_BITRATE` | deemix's own | e.g. `9` FLAC, `3` MP3 320 |
 | `MT_MAX_QUEUE` | `100` | releases queued per run |
-| `MT_LIBRARY` | `/music` | the library, read-only, for `artist search` |
+| `MT_LIBRARY` | `/music` | the library, `<Category>/<Artist>/<Album>`: read by `artist search`, written by `links` |
+| `MT_LINKS_EXCLUDE` | none | categories `links` never shows or touches, comma-separated (another tool's output) |
+| `MT_WEB_HOST`, `MT_WEB_PORT` | `0.0.0.0`, `8000` | where `serve` listens |
 | `APPRISE_URL` | unset | an apprise-api `/notify/<key>` URL |
 
 Notifications: releases queued, a login restored, and problems (each problem
@@ -189,4 +257,5 @@ python -m pytest -q
 ```
 
 Standard library only. The tests run against a fake Deezer, MusicBrainz and
-deemix.
+deemix, build a small library in a temp folder for `links`, and drive the web
+UI over HTTP.
