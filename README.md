@@ -232,6 +232,20 @@ DELETE /api/links?link=<path>           remove a link
 GET    /healthz
 ```
 
+And read-only JSON of playlists to copy, for a tool that builds playlists in
+your own player from them:
+
+```
+GET    /api/deezer/playlists            the Deezer account's own playlists: id, title, songs
+GET    /api/deezer/playlists/<id>       one of them, its songs in order (private ones too)
+GET    /api/spotify/playlists/<id>      a PUBLIC Spotify playlist, by its id
+```
+
+Deezer's come through deemix's login, so only that account's own playlists are
+served (404 for any other). Spotify's need no login: the page a shared link opens
+lists the songs. A private Spotify playlist, and the songs its owner hid, are not
+on that page, so nothing here can see them.
+
 ## Settings
 
 | Variable | Default | |

@@ -49,6 +49,16 @@ class FakeHttp:
             if m == "deezer.getUserData":
                 return {"error": [], "results": {"USER": {"USER_ID": 42, "BLOG_NAME": "me"}, "checkForm": "tok"}}
             assert p["api_token"] == "tok"
+            if m == "deezer.pageProfile" and body.get("tab") == "playlists":
+                return {"error": {}, "results": {"TAB": {"playlists": {"data": [
+                    {"PLAYLIST_ID": "15", "TITLE": "Glow", "NB_SONG": "2"}, {"PLAYLIST_ID": "x", "TITLE": "broken"}]}}}}
+            if m == "playlist.getSongs":
+                assert body["PLAYLIST_ID"] == 15
+                return {"error": {}, "results": {"data": [
+                    {"SNG_ID": "3", "SNG_TITLE": "Let You Down", "ART_NAME": "Dawid Podsiadlo", "ALB_TITLE": "Let You Down",
+                     "DURATION": "227", "EXPLICIT_LYRICS": "0", "ISRC": "PL1", "ARTISTS": [{"ART_NAME": "Dawid Podsiadlo"}]},
+                    {"SNG_ID": "4", "SNG_TITLE": "Who's Ready for Tomorrow", "ART_NAME": "RAT BOY", "VERSION": "",
+                     "DURATION": "116", "EXPLICIT_LYRICS": "1", "ARTISTS": [{"ART_NAME": "RAT BOY"}, {"ART_NAME": "IBDY"}]}]}}
             if m == "deezer.pageProfile":
                 return {"error": {}, "results": {"TAB": {"artists": {"data": w.favs}}}}
             if m == "artist.addFavorite":
@@ -471,3 +481,41 @@ def test_a_deemix_login_that_fails_is_put_back_in_the_same_run(cli, w, monkeypat
     assert any("last one that worked was put back" in m for m in sent)
     assert run("run") == 0, capsys.readouterr().out
     assert w.queued == ["https://www.deezer.com/album/11", "https://www.deezer.com/album/12"]
+
+
+def test_the_accounts_playlists_and_their_songs_in_order(w):
+    a = account(w)
+    assert a.playlists() == [{"id": 15, "title": "Glow", "songs": 2}]
+    songs = a.playlist_songs(15)
+    assert [(x["artist"], x["title"], x["explicit"]) for x in songs] == [
+        ("Dawid Podsiadlo", "Let You Down", False), ("RAT BOY", "Who's Ready for Tomorrow", True)]
+    assert songs[1]["artists"] == ["RAT BOY", "IBDY"] and songs[0]["seconds"] == 227
+
+
+EMBED = ('<html><script id="__NEXT_DATA__" type="application/json">' + json.dumps({"props": {"pageProps": {"state": {"data": {
+    "entity": {"name": "Evening Drive", "subtitle": "Sam Lee", "trackList": [
+        {"uri": "spotify:track:abc", "title": "I Really Want to Stay at Your House", "subtitle": "Rosa Walton, Hallie Coggins",
+         "duration": 246000, "isExplicit": False}]}}}}}}) + "</script></html>")
+
+
+def test_a_public_spotify_playlist_from_its_share_link():
+    from music_tools.spotify import SpotifyError, playlist_id, public_playlist
+
+    class Page:
+        def text(self, url):
+            assert url == "https://open.spotify.com/embed/playlist/0a1B2c3D4e5F6g7H8i9J0k"
+            return EMBED
+    pl = public_playlist("https://open.spotify.com/playlist/0a1B2c3D4e5F6g7H8i9J0k?si=x&pi=y", Page())
+    assert (pl["title"], pl["owner"]) == ("Evening Drive", "Sam Lee")
+    assert pl["tracks"] == [{"title": "I Really Want to Stay at Your House", "artist": "Rosa Walton",
+                             "artists": ["Rosa Walton", "Hallie Coggins"], "seconds": 246, "explicit": False,
+                             "spotify_id": "abc"}]
+    for bad in ("../../etc", "short", "0a1B2c3D4e5F6g7H8i9J0k/../x"):
+        with pytest.raises(SpotifyError):
+            playlist_id(bad)
+
+    class Gone:
+        def text(self, url):
+            return "<html>nothing</html>"
+    with pytest.raises(SpotifyError, match="no track list"):
+        public_playlist("0a1B2c3D4e5F6g7H8i9J0k", Gone())

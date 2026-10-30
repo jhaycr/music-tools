@@ -54,6 +54,22 @@ class Account:
     def add_favorite_artist(self, artist_id: int) -> None:
         self.gw("artist.addFavorite", {"ART_ID": artist_id})
 
+    def playlists(self) -> list[dict]:
+        """The account's own playlists: id, title, how many songs."""
+        res = self.gw("deezer.pageProfile", {"USER_ID": self.user["USER_ID"], "tab": "playlists", "nb": 2000})
+        data = ((res or {}).get("TAB") or {}).get("playlists", {}).get("data") or []
+        return [{"id": int(p["PLAYLIST_ID"]), "title": p.get("TITLE") or "", "songs": int(p.get("NB_SONG") or 0)}
+                for p in data if str(p.get("PLAYLIST_ID") or "").isdigit()]
+
+    def playlist_songs(self, playlist_id: int) -> list[dict]:
+        """A playlist's songs in its order (private playlists too: the gateway, not the public API)."""
+        res = self.gw("playlist.getSongs", {"PLAYLIST_ID": playlist_id, "nb": 2000, "start": 0})
+        return [{"artist": s.get("ART_NAME") or "", "artists": [a.get("ART_NAME") for a in s.get("ARTISTS") or []],
+                 "title": s.get("SNG_TITLE") or "", "version": s.get("VERSION") or "", "album": s.get("ALB_TITLE") or "",
+                 "isrc": s.get("ISRC") or "", "seconds": int(s.get("DURATION") or 0),
+                 "explicit": str(s.get("EXPLICIT_LYRICS") or "0") != "0", "deezer_id": int(s.get("SNG_ID") or 0)}
+                for s in (res or {}).get("data") or []]
+
 
 class Catalogue:
     """The public API: 50 requests per 5 seconds, no login."""

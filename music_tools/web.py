@@ -14,6 +14,12 @@ Plain HTML forms that POST and redirect back; a JSON twin for links:
   DELETE /api/links?link=<path>           remove a link
   GET    /healthz
 
+and read-only JSON of the playlists to copy, for whatever builds playlists here:
+
+  GET    /api/deezer/playlists            the Deezer account's own playlists: id, title, songs
+  GET    /api/deezer/playlists/<id>       one of them, its songs in order
+  GET    /api/spotify/playlists/<id>      a PUBLIC Spotify playlist, by id or share link's id
+
 No sign-in of its own: run it behind one (Authentik, a VPN). A POST or DELETE
 whose Origin names another site is refused, so another page can't drive it.
 """
@@ -32,6 +38,7 @@ from .deezer import Catalogue, DeezerError
 from .follow import add_favorite
 from .http import HttpError
 from .links import Library, LinkError
+from .spotify import SpotifyError, public_playlist
 from .store import Store
 
 TITLE = "music-tools"
@@ -81,6 +88,12 @@ def _local(back: str) -> str:
     return back
 
 
+class PlaylistError(Exception):
+    def __init__(self, status: int, msg: str):
+        super().__init__(msg)
+        self.status = status
+
+
 class Tools:
     """What the pages do, apart from rendering. Tests swap the network-bound parts."""
 
@@ -119,6 +132,26 @@ class Tools:
             raise ArtistError(f"deemix's Deezer login is {state}; fix it under Deezer login first")
         cat = Catalogue()
         return add_favorite(account, cat, resolve(ref, cat, MusicBrainz()))
+
+    def deezer_account(self):
+        from .arl import check
+        state, account = check(self.cfg)
+        if not account:
+            raise PlaylistError(503, f"deemix's Deezer login is {state}; fix it under Deezer login first")
+        return account
+
+    def deezer_playlists(self) -> list[dict]:
+        return self.deezer_account().playlists()
+
+    def deezer_playlist(self, playlist_id: int) -> dict:
+        account = self.deezer_account()
+        own = {p["id"]: p for p in account.playlists()}
+        if playlist_id not in own:
+            raise PlaylistError(404, "not one of this Deezer account's playlists")
+        return {**own[playlist_id], "tracks": account.playlist_songs(playlist_id)}
+
+    def spotify_playlist(self, ref: str) -> dict:
+        return public_playlist(ref)
 
     def following(self) -> dict:
         store = Store(self.cfg.db)
@@ -357,6 +390,8 @@ def make_handler(tools: Tools):
                     return self.redirect("/links")
                 if route == "/api/links":
                     return self.json(200, [l.__dict__ for l in lib.links()])
+                if route.startswith(("/api/deezer/", "/api/spotify/")):
+                    return self.playlists_api(route)
                 pages = {
                     "/links": lambda: ("Links", links_home(lib)),
                     "/links/browse": lambda: (q.get("path", ""), links_browse(lib, q.get("path", ""))),
@@ -373,6 +408,24 @@ def make_handler(tools: Tools):
             except (DeezerError, HttpError, ArtistError) as ex:
                 return self.send(502, page(route, TITLE, "", err=f"Deezer or MusicBrainz didn't answer: {ex}"))
             self.send(404, page(route, TITLE, '<p><a href="/links">Back to Links</a></p>', err="No such page"))
+
+        def playlists_api(self, route: str):
+            parts = route.split("/")[2:]
+            try:
+                if parts == ["deezer", "playlists"]:
+                    return self.json(200, tools.deezer_playlists())
+                if len(parts) == 3 and parts[:2] == ["deezer", "playlists"] and parts[2].isascii() \
+                        and parts[2].isdigit() and len(parts[2]) <= 20:
+                    return self.json(200, tools.deezer_playlist(int(parts[2])))
+                if len(parts) == 3 and parts[:2] == ["spotify", "playlists"]:
+                    return self.json(200, tools.spotify_playlist(parts[2]))
+            except PlaylistError as ex:
+                return self.json(ex.status, {"error": str(ex)})
+            except SpotifyError as ex:
+                return self.json(400 if "22 letters" in str(ex) else 502, {"error": str(ex)})
+            except (DeezerError, HttpError) as ex:
+                return self.json(502, {"error": f"Deezer didn't answer: {ex}"})
+            return self.json(404, {"error": "no such playlist route"})
 
         def do_POST(self):
             route = urlsplit(self.path).path

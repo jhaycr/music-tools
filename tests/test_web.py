@@ -47,6 +47,23 @@ class FakeTools(Tools):
                  {"id": 8, "name": "KDA Fans", "fans": 1, "releases": 0, "favourite": True, "latest": [], "mb": None,
                   "library": []}], [], "")
 
+    def deezer_account(self):
+        if not self.logged_in:
+            from music_tools.web import PlaylistError
+            raise PlaylistError(503, "deemix's Deezer login is invalid; fix it under Deezer login first")
+
+        class Account:
+            def playlists(self):
+                return [{"id": 15, "title": "Glow", "songs": 1}]
+
+            def playlist_songs(self, pid):
+                return [{"artist": "RAT BOY", "title": "Who's Ready for Tomorrow"}]
+        return Account()
+
+    def spotify_playlist(self, ref):
+        from music_tools.spotify import playlist_id
+        return {"id": playlist_id(ref), "title": "Glow", "owner": "me", "tracks": []}
+
     def favorite(self, ref):
         if ref != "7":
             raise ArtistError("names are not accepted")
@@ -169,3 +186,19 @@ def test_pages_escape_names(web, cfg):
     Path(cfg.library, "General", "<img src=x onerror=alert(1)>").mkdir()
     body = web("GET", "/links/browse?path=General")[2]
     assert "<img src=x" not in body and "&lt;img src=x onerror=alert(1)&gt;" in body
+
+
+def test_the_playlists_api_reads_only_the_accounts_own(web):
+    status, _, body = web("GET", "/api/deezer/playlists")
+    assert status == 200 and json.loads(body) == [{"id": 15, "title": "Glow", "songs": 1}]
+    status, _, body = web("GET", "/api/deezer/playlists/15")
+    assert status == 200 and json.loads(body)["tracks"][0]["title"] == "Who's Ready for Tomorrow"
+    assert web("GET", "/api/deezer/playlists/16")[0] == 404, "not the account's own"
+    for bad in ("/api/deezer/playlists/1%2F2", "/api/deezer/playlists/-1", "/api/deezer/playlists/" + "9" * 21,
+                "/api/deezer/other"):
+        assert web("GET", bad)[0] == 404, bad
+    assert web("GET", "/api/spotify/playlists/0a1B2c3D4e5F6g7H8i9J0k")[0] == 200
+    assert web("GET", "/api/spotify/playlists/nope")[0] == 400
+    web.tools.logged_in = False
+    assert web("GET", "/api/deezer/playlists")[0] == 503
+    web.tools.logged_in = True

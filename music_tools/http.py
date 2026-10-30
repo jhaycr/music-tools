@@ -58,3 +58,18 @@ class Http:
             return json.loads(raw) if raw else None
         except ValueError:
             return None
+
+    def text(self, url: str, limit: int = 4 * 1024 * 1024) -> str:
+        """A page's text (a web page, not an API). One try; HttpError names the host only."""
+        host = urllib.parse.urlsplit(url).netloc
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html"})
+        try:
+            with self._opener.open(req, timeout=self.timeout) as r:
+                raw = r.read(limit + 1)
+        except urllib.error.HTTPError as e:
+            raise HttpError(f"{host}: HTTP {e.code}") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            raise HttpError(f"{host}: {type(getattr(e, 'reason', e)).__name__}") from None
+        if len(raw) > limit:
+            raise HttpError(f"{host}: the page is too large")
+        return raw.decode("utf-8", "replace")
